@@ -1,0 +1,242 @@
+/* [DAN] COMMIT — brand tokens + fonts copied deliberately from DAN's own brand source of
+   truth, same "copy, verify, don't cross-repo-depend" discipline. Fonts are the real,
+   self-hosted OFL files (public/fonts/, LICENSES.md alongside) — no external font fetch, same
+   "no third-party beacon on a page whose pitch is privacy" reasoning the source file states.
+
+   🔴 NO GREY TEXT — every foreground is full ink (--dan-text), never --dan-text-2/--dan-text-3.
+   De-emphasis comes from size/weight, not colour. Red is the one signal colour, theme-invariant. */
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("fonts/JetBrainsMono-latin.woff2") format("woff2");
+  font-weight: 100 800;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Doto";
+  src: url("fonts/Doto-latin.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  /* native controls (number spinners, <select> arrow, scrollbars) follow the theme */
+  color-scheme: light dark;
+  --dan-red: #f25b4f;
+  --dan-font: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI Variable Text",
+    "Segoe UI", Roboto, Ubuntu, Cantarell, "Noto Sans", system-ui, sans-serif;
+  --dan-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", "Cascadia Mono",
+    Consolas, "DejaVu Sans Mono", "Liberation Mono", monospace;
+  --dan-dot: "Doto", "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas,
+    "DejaVu Sans Mono", monospace;
+
+  --dan-bg: #f5f5f3;
+  --dan-bg-2: #ffffff;
+  --dan-text: #16161a;
+  --dan-border: rgba(0, 0, 0, 0.12);
+  --dan-border-2: rgba(0, 0, 0, 0.2);
+  --dan-btn-text: #ffffff;
+  --dan-ok: #2e9e56;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --dan-bg: #1b1b1f;
+    --dan-bg-2: #232329;
+    --dan-text: #f5f5f7;
+    --dan-border: rgba(255, 255, 255, 0.12);
+    --dan-border-2: rgba(255, 255, 255, 0.2);
+    --dan-btn-text: #0e0e11;
+    --dan-ok: #3ecb72;
+  }
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+/* 🔴 REAL BUG FOUND + FIXED: `height: 100%` + `display: flex; flex-direction: column` clips a
+   flex child to the viewport's own height instead of letting it grow — once real page content
+   (cards + diff + footer) got taller than one screen, the footer stopped following it in normal
+   flow and rendered floating mid-page, overlapping the Commit-message card. `min-height` lets the
+   body grow past the viewport when real content needs more room, same as a plain (non-flex) page
+   already would. */
+html, body { min-height: 100%; }
+/* Real scrollbar ink, same "no grey, full ink" rule as everything else — the default OS
+   scrollbar (dark thumb on a light track, or invisible-in-dark-mode in some browsers) doesn't
+   follow the page's own theme reliably, so this states it explicitly for both engines. */
+* { scrollbar-color: var(--dan-text) var(--dan-bg-2); scrollbar-width: thin; }
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: var(--dan-bg-2); }
+*::-webkit-scrollbar-thumb { background: var(--dan-text); border-radius: 6px; border: 2px solid var(--dan-bg-2); }
+/* 🔴 REAL BUG FOUND + FIXED: `.layout { flex: 1 }` inside a flex column body grows to fill
+   leftover vertical space below short page content — real space, so selecting text and dragging
+   (or a keyboard select-all) paints the selection highlight across that empty box too, all the
+   way down to the footer/viewport edge, not just the text. Grid rows (auto content / 1fr / auto)
+   give the exact same "push the footer down" behavior without a flex item that grows past its own
+   content, so there's no leftover box for the browser to paint a selection into. */
+body {
+  background: var(--dan-bg);
+  color: var(--dan-text);
+  font-family: var(--dan-font);
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  min-height: 100vh;
+}
+
+.dan-br { color: var(--dan-red); }
+.dan-logo { font-family: var(--dan-mono); font-weight: 800; font-size: 22px; letter-spacing: 0.02em; color: var(--dan-text); text-decoration: none; }
+.dan-logo .dan-br { margin: 0 0.1em; }
+
+header {
+  height: 54px; box-sizing: border-box; display: flex; align-items: center;
+  justify-content: space-between; padding: 0 20px; border-bottom: 1px solid var(--dan-border);
+  flex-shrink: 0;
+}
+header .tagline { font-size: 12.5px; font-weight: 600; }
+
+.layout {
+  padding: 16px 20px; min-height: 0;
+}
+
+/* 🔴 the red box — real company intro, pinned to the TRUE viewport edge (not the centered
+   content column's own edge) and wide enough to hold the tagline on one real line. Fixed, not
+   in-flow, so it never fights the centered `.layout` column for width; `.layout` gets real
+   left padding on the same breakpoint so its own content never sits under it. Hidden below that
+   breakpoint so mobile stays one column, same as before. */
+.intro-box {
+  /* 🔴 REAL BUG FOUND + FIXED: the sidebar sat flush under the header (top: 54px) while the first
+     real card sat 16px lower (`.layout`'s own top padding) — their top EDGES never lined up,
+     verified via getBoundingClientRect (70 vs 54). top: 86px matches that same offset now that the
+     box floats 16px in from the edges instead of sitting flush against them (see below). */
+  position: fixed; left: 16px; top: 86px; bottom: 16px; width: 352px; overflow-y: auto;
+  border: 1px solid var(--dan-red); border-radius: 14px;
+  box-shadow: 0 2px 14px rgba(0, 0, 0, 0.07);
+  padding: 22px; background: color-mix(in srgb, var(--dan-red) 7%, var(--dan-bg-2));
+  font-size: 12.5px; line-height: 1.55;
+}
+.intro-box p { margin: 0 0 12px; }
+.intro-box p:last-child { margin-bottom: 0; }
+.intro-heading { font-weight: 700; letter-spacing: 0.015em; font-size: 11.5px; white-space: nowrap; }
+.intro-strong { font-weight: 700; }
+.intro-mono { font-family: var(--dan-mono); font-size: 11px; letter-spacing: 0.02em; }
+.intro-mono.dan-dot { font-size: 9.5px; letter-spacing: 0.01em; white-space: nowrap; }
+.site-text { color: var(--dan-text); } /* real text, not a hyperlink — never navigates */
+@media (max-width: 940px) { .intro-box { display: none; } }
+
+/* [DAN] dot-matrix accent — the brand pack's own `.dan-dot` label/tagline treatment, real font
+   (self-hosted Doto, public/fonts/), sized big per spec rather than the pack's own small-label
+   default, since this is the page's own headline moment, not a small inline tag. */
+.dan-dot { font-family: var(--dan-dot); font-weight: 900; text-transform: uppercase; letter-spacing: 0.05em; color: var(--dan-text); }
+.dan-dot .dan-br { margin: 0 0.05em; }
+
+main { max-width: 720px; margin: 0 auto; }
+
+.dan-card {
+  background: var(--dan-bg-2); border: 1px solid var(--dan-border); border-radius: 14px;
+  padding: 14px 16px; margin-bottom: 12px;
+}
+
+.dan-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  background: var(--dan-red); color: #1b1b20; font-family: var(--dan-font);
+  font-size: 14px; font-weight: 600; padding: 12px 20px; border-radius: 10px;
+  text-decoration: none; border: 0; cursor: pointer; transition: opacity 0.2s, transform 0.2s;
+}
+.dan-btn:hover { opacity: 0.9; transform: translateY(-1px); }
+.dan-btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+
+.dan-btn-ghost {
+  display: inline-flex; align-items: center; gap: 8px; font-family: var(--dan-mono);
+  font-size: 12px; font-weight: 600; letter-spacing: 0.05em; color: var(--dan-text);
+  border: 1px solid var(--dan-border-2); border-radius: 8px; padding: 9px 16px;
+  background: transparent; cursor: pointer;
+}
+.dan-btn-ghost:hover { border-color: var(--dan-red); color: var(--dan-red); }
+
+h1 { font-size: 20px; margin: 0 0 4px; }
+h2 {
+  font-size: 14px; font-weight: 700; margin: 0 0 10px; text-transform: uppercase; letter-spacing: 0.04em;
+  display: flex; align-items: center; gap: 8px;
+}
+
+/* Dot-matrix icon grid — matches the brand pack's own `.dan-idg`/`.dan-idp` render shape
+   (dan-icons.js's `dot()`), same pixel-cell technique, ported into public/icons.js above. */
+.dan-idg { display: inline-grid; vertical-align: middle; }
+.dan-idp { border-radius: 50%; display: block; }
+
+.file-list { list-style: none; margin: 0; padding: 0; font-family: var(--dan-mono); font-size: 12.5px; }
+.file-list li { display: flex; gap: 10px; padding: 3px 0; }
+.file-status { width: 14px; text-align: center; font-weight: 700; }
+.file-status.M { color: var(--dan-text); }
+.file-status.A { color: var(--dan-ok); }
+.file-status.D { color: var(--dan-red); }
+
+pre.diff {
+  background: var(--dan-bg); border: 1px solid var(--dan-border); border-radius: 10px;
+  padding: 10px 12px; font-family: var(--dan-mono); font-size: 11.5px; overflow-x: auto;
+  max-height: 160px; overflow-y: auto; white-space: pre-wrap; word-break: break-word;
+}
+/* light syntax highlighting on the real diff — added/removed/hunk lines, colour only. */
+pre.diff .add  { color: #2e9e56; }
+pre.diff .del  { color: var(--dan-red); }
+pre.diff .hunk { color: #2563eb; font-weight: 600; }
+pre.diff .meta { opacity: 0.65; }
+@media (prefers-color-scheme: dark) {
+  pre.diff .add  { color: #3ecb72; }
+  pre.diff .hunk { color: #5b8cff; }
+}
+
+/* summary char-count + copy button under the message box */
+.msg-meta { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 8px; }
+.msg-meta .hint { font-variant-numeric: tabular-nums; }
+
+textarea#message {
+  width: 100%; min-height: 70px; font-family: var(--dan-mono); font-size: 13px;
+  background: var(--dan-bg); color: var(--dan-text); border: 1px solid var(--dan-border);
+  border-radius: 10px; padding: 10px 12px; resize: vertical;
+}
+textarea#message:focus { outline: none; border-color: var(--dan-red); }
+
+.actions { display: flex; gap: 10px; align-items: center; margin-top: 12px; flex-wrap: wrap; }
+.hint { font-size: 13.5px; font-weight: 500; }
+#providerDisclosure { margin: 0 0 10px; }
+#providerDisclosure:empty { display: none; }
+.actions label.hint { display: inline-flex; align-items: center; gap: 7px; }
+.actions label.hint input[type="checkbox"] { width: 17px; height: 17px; accent-color: var(--dan-red); }
+
+.dan-seal { --dan-sz: 16px; display: inline-block; width: var(--dan-sz); height: var(--dan-sz);
+  border-radius: 50%; vertical-align: middle;
+  background: conic-gradient(from 0deg, transparent 0 62%, var(--dan-red) 85%, transparent 92%);
+  -webkit-mask: radial-gradient(closest-side, transparent 62%, #000 63%);
+  mask: radial-gradient(closest-side, transparent 62%, #000 63%);
+  animation: dan-seal-spin 0.9s linear infinite;
+}
+@keyframes dan-seal-spin { to { transform: rotate(1turn); } }
+.hidden { display: none !important; }
+
+footer {
+  padding: 20px 20px 40px; border-top: 1px solid var(--dan-border);
+  font-size: 12.5px; font-weight: 500;
+}
+footer a { color: var(--dan-red); text-decoration: none; }
+footer a:hover { text-decoration: underline; }
+footer p { margin: 0 0 12px; }
+footer .footer-brand { font-family: var(--dan-mono); font-size: 11.5px; letter-spacing: 0.02em; }
+
+/* 🔴 REAL BUG FOUND + FIXED: this override must come AFTER the base `.layout`/`footer` rules in
+   source order — CSS media queries carry no special cascade priority of their own, so an earlier
+   media-query rule loses to a later plain rule of equal specificity regardless of which one is
+   "supposed" to win. footer's own shorthand `padding` (declared later, in the base rules above)
+   was silently resetting this block's `padding-left` back to 20px every time. Real fix: put
+   width-dependent overrides at the END of the file, where the cascade actually respects them. */
+@media (min-width: 941px) {
+  /* 🔴 REAL BUG FOUND + FIXED: this used to be `padding-left: 400px` on TOP of `.layout`'s own
+     `margin: 0 auto` centering in the FULL viewport width — the two never agreed, leaving a real,
+     unexplained ~180px dead gap between the sidebar's own right edge (380px) and where the cards
+     actually started (560px on a 1280px screen). `margin-left` on the outer `.layout`/`footer`
+     containers offsets them by exactly the sidebar's real width; `main`'s own `margin: 0 auto`
+     then centers the cards in whatever space genuinely remains, not in the full viewport. */
+  .layout { margin-left: 392px; }
+  footer { margin-left: 392px; }
+}

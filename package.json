@@ -1,0 +1,41 @@
+{
+  "name": "dan-oss-commit",
+  "version": "0.1.0",
+  "description": "[DAN] COMMIT — analyses your staged changes and writes a real commit message from the real diff. One command, no backend to deploy.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "dan-oss-commit": "bin/dan-oss-commit.js"
+  },
+  "scripts": {
+    "prepare": "husky || true",
+    "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "husky": "^9.1.7"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "bin",
+    "src",
+    "public",
+    "examples",
+    "LICENSE",
+    "TRADEMARK.md"
+  ],
+  "keywords": [
+    "git",
+    "commit-message",
+    "ai",
+    "cli",
+    "developer-tools"
+  ],
+  "author": "DAN Systems",
+  "homepage": "https://github.com/STRATO-DAN/dan-oss-commit",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/STRATO-DAN/dan-oss-commit.git"
+  }
+}

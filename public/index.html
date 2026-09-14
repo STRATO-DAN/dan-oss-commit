@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>[DAN] COMMIT</title>
+<link rel="stylesheet" href="/style.css">
+<script src="/icons.js"></script>
+</head>
+<body>
+  <header>
+    <a class="dan-logo" href="/"><span class="dan-br">[</span>DAN<span class="dan-br">]</span> COMMIT</a>
+    <span class="tagline">Real diff in. Real commit message out.</span>
+  </header>
+
+  <aside class="intro-box">
+    <p class="intro-heading dan-dot">Sovereign <span class="dan-br">[</span>AI<span class="dan-br">]</span> system of <span class="dan-br">[</span>Systems<span class="dan-br">]</span></p>
+    <p><span class="dan-br">[</span>DAN<span class="dan-br">]</span> is a sovereign AI system of
+      systems — the Digital Architecture Network. Built edge-first, on-device, in the UAE.</p>
+    <p class="intro-strong">Privacy is the architecture, not the afterthought.</p>
+    <p class="intro-mono dan-dot">
+      <span class="dan-br">[</span>DAN<span class="dan-br">]</span> — DIGITAL ARCHITECTURE NETWORK, LET'S GO <span class="dan-br">[</span>BEYOND<span class="dan-br">]</span>
+    </p>
+    <p class="intro-mono">
+      STRATO MESH NETWORK<br>
+      <span class="site-text">www.thedubai.ai</span>
+    </p>
+  </aside>
+
+  <div class="layout">
+  <main>
+    <div class="dan-card">
+      <h2><span id="icon-repo"></span>Repo</h2>
+      <div id="status">Reading real repo state…</div>
+    </div>
+
+    <div class="dan-card">
+      <h2><span id="icon-files"></span>Changed files</h2>
+      <ul class="file-list" id="files"></ul>
+    </div>
+
+    <div class="dan-card">
+      <h2><span id="icon-diff"></span>Real diff</h2>
+      <pre class="diff" id="diff">Reading the real diff…</pre>
+    </div>
+
+    <div class="dan-card">
+      <h2><span id="icon-commit"></span>Commit message</h2>
+      <p class="hint" id="providerDisclosure"></p>
+      <div class="actions">
+        <button class="dan-btn" id="generate">Generate from the real diff</button>
+        <span class="hint" id="genStatus"></span>
+      </div>
+      <div style="margin-top: 14px;">
+        <textarea id="message" placeholder="Write your own, or click Generate above."></textarea>
+        <div class="msg-meta">
+          <span class="hint" id="charCount">0 characters in the summary line</span>
+          <button class="dan-btn-ghost" id="copyMsg" disabled>Copy</button>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="dan-btn" id="commit" disabled>Commit</button>
+        <label class="hint"><input type="checkbox" id="stageAll"> stage all changes first (unstaged diff only)</label>
+        <span class="hint" id="commitStatus"></span>
+      </div>
+    </div>
+  </main>
+  </div>
+
+  <footer>
+    <strong><span class="dan-br">[</span>DAN<span class="dan-br">]</span> MEMORY SMASH</strong> —
+    the full codebase-memory engine this tool's commit-analysis capability also lives inside —
+    is coming soon.
+  </footer>
+
+  <script>
+    // px=3 — a small inline glyph beside an h2 label, not the sidebar's own headline-scale use
+    // of the dot font. At the library's default (12px/cell) a 7-wide icon renders ~100px, far
+    // bigger than the text it's meant to sit beside — this stacked it above the heading instead.
+    document.getElementById("icon-repo").innerHTML = DANIcons.dot("folder", 3);
+    document.getElementById("icon-files").innerHTML = DANIcons.dot("doc", 3);
+    document.getElementById("icon-diff").innerHTML = DANIcons.dot("code", 3);
+    document.getElementById("icon-commit").innerHTML = DANIcons.dot("check", 3);
+  </script>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
