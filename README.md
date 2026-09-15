@@ -7,7 +7,7 @@
 **Reads your real diff, writes a real commit message. One command, on your own machine.**
 
 [![CI](https://github.com/STRATO-DAN/dan-oss-commit/actions/workflows/ci.yml/badge.svg)](https://github.com/STRATO-DAN/dan-oss-commit/actions/workflows/ci.yml)
-[![npm version](https://img.shields.io/npm/v/dan-oss-commit.svg)](https://www.npmjs.com/package/dan-oss-commit)
+[![npm version](https://img.shields.io/npm/v/@strato-dan/commit.svg)](https://www.npmjs.com/package/@strato-dan/commit)
 [![runtime deps](https://img.shields.io/badge/runtime%20deps-0-2e9e56.svg)](#dependencies)
 [![docs](https://img.shields.io/badge/docs-README-blue.svg)](#use)
 [![license](https://img.shields.io/badge/license-MIT-informational.svg)](LICENSE)
@@ -15,7 +15,7 @@
 </div>
 
 > **⚡ Zero install · zero runtime dependencies.** No `npm install`, no build step —
-> `npx dan-oss-commit` runs it and `npm test` tests it. Pure Node standard library (Node ≥ 18).
+> `npx @strato-dan/commit` runs it and `npm test` tests it. Pure Node standard library (Node ≥ 18).
 > The **Generate** button uses an API key you already have (env var, not an install); everything
 > else works with no key. Full breakdown under [Dependencies](#dependencies).
 
@@ -26,7 +26,7 @@ machine against your own git repo.
 ## Use
 
 ```bash
-npx dan-oss-commit
+npx @strato-dan/commit
 ```
 
 Run it inside any real git repository. It opens `http://127.0.0.1:4870` (loopback only — never
@@ -161,7 +161,7 @@ built — `configuredProvider()` picks one deterministically, it doesn't call bo
 | | |
 |---|---|
 | **Runtime dependencies** | **0** — Node standard library only |
-| **Install to run** | none — `npx dan-oss-commit` |
+| **Install to run** | none — `npx @strato-dan/commit` |
 | **Install to test** | none — `npm test` uses Node's built-in test runner |
 | **Node** | ≥ 18 |
 | **API key** | `ANTHROPIC_API_KEY` **or** `OPENAI_API_KEY` — only for the **Generate** button, and it's your own existing key as an env var, not an installed package. Reading the diff and committing need no key. |
