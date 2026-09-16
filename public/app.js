@@ -3,6 +3,30 @@
 
 const $ = (id) => document.getElementById(id);
 let currentSource = "none";
+let currentSnapshot = null; // v0.2 — the reviewed repo snapshot; sent with commit so the server can fail closed on drift
+
+// v0.2 — the API requires the instance bearer token. It arrives in the launch URL (?token=…); capture it
+// once, strip it from the visible URL, and attach it to every API call.
+const COMMIT_TOKEN = (() => {
+  try {
+    const u = new URL(location.href);
+    const fromUrl = u.searchParams.get("token");
+    if (fromUrl) {
+      try { sessionStorage.setItem("commitToken", fromUrl); } catch {}
+      u.searchParams.delete("token");
+      history.replaceState(null, "", u.pathname + u.search + u.hash);
+      return fromUrl;
+    }
+    return sessionStorage.getItem("commitToken") || "";
+  } catch {
+    return "";
+  }
+})();
+
+async function api(path, opts = {}) {
+  const headers = { ...(opts.headers || {}), authorization: `Bearer ${COMMIT_TOKEN}` };
+  return fetch(path, { ...opts, headers });
+}
 
 function escapeHtml(s) {
   return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -32,7 +56,7 @@ function updateMsgMeta() {
 }
 
 async function loadStatus() {
-  const res = await fetch("/api/status");
+  const res = await api("/api/status");
   const data = await res.json();
   if (!data.isRepo) {
     $("status").textContent = `${data.cwd} is not a real git repository.`;
@@ -66,13 +90,14 @@ async function loadStatus() {
 }
 
 async function loadDiff() {
-  const res = await fetch("/api/diff");
+  const res = await api("/api/diff");
   const data = await res.json();
   if (!data.ok) {
     $("diff").textContent = data.reason;
     return;
   }
   currentSource = data.source;
+  currentSnapshot = data.snapshot; // bind this reviewed state to the eventual commit
   if (data.source === "none") {
     $("diff").textContent = "No real changes — nothing staged, nothing unstaged.";
     $("files").innerHTML = "";
@@ -90,13 +115,15 @@ async function generate() {
   btn.disabled = true;
   status.innerHTML = `<span class="dan-seal"></span> Reading the real diff and asking the real model…`;
   try {
-    const diffRes = await fetch("/api/diff");
+    const diffRes = await api("/api/diff");
     const diffData = await diffRes.json();
     if (!diffData.ok || diffData.source === "none") {
       status.textContent = "No real changes to describe.";
       return;
     }
-    const res = await fetch("/api/generate", {
+    currentSource = diffData.source;
+    currentSnapshot = diffData.snapshot;
+    const res = await api("/api/generate", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ diff: diffData.diff }),
@@ -128,14 +155,15 @@ async function commit() {
   $("commit").disabled = true;
   status.textContent = "Committing…";
   try {
-    const res = await fetch("/api/commit", {
+    const res = await api("/api/commit", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ message, stageAll }),
+      body: JSON.stringify({ message, stageAll, snapshot: currentSnapshot }),
     });
     const data = await res.json();
     if (!data.ok) {
-      status.textContent = data.reason;
+      status.textContent = data.stale ? `${data.reason}` : data.reason;
+      if (data.stale) await loadDiff(); // repo drifted — reload the reviewed state
       $("commit").disabled = false;
       return;
     }

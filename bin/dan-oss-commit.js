@@ -9,10 +9,15 @@ const cwd = process.cwd();
 const port = Number(process.env.DAN_OSS_COMMIT_PORT) || 4870;
 
 const server = await listen(port, cwd);
-const url = `http://127.0.0.1:${port}`;
+const token = server.commitToken;
+const base = `http://127.0.0.1:${port}`;
+// The dashboard needs the instance token to call the API — hand it over in the launch URL. The token is
+// ephemeral (per run, never written to disk), so open THIS URL; a process that didn't see it can't drive the API.
+const url = `${base}/?token=${encodeURIComponent(token)}`;
 
-console.log(`[DAN] COMMIT running at ${url}`);
+console.log(`[DAN] COMMIT running — open this URL (it carries your access token):\n  ${url}`);
 console.log(`Reading real changes in: ${cwd}`);
+console.log(`API access token (agents/CI can set DAN_OSS_COMMIT_TOKEN instead): ${token}`);
 console.log("Ctrl-C to stop.\n");
 
 // Best-effort browser open — never the reason the tool fails to start. execFile (no shell); on Windows
