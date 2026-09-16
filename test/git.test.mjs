@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { isRepo, realDiff, changedFiles, currentBranch, hasCommits, realCommit } from "../src/git.js";
+import { isRepo, realDiff, changedFiles, currentBranch, hasCommits, realCommit, repoSnapshot, repoTrees, commitTree } from "../src/git.js";
 
 const run = promisify(execFile);
 
@@ -105,10 +105,61 @@ test("realCommit only stages everything when explicitly told to, and returns a r
   }
 });
 
-test("a git failure (e.g. committing with nothing staged) surfaces a real, readable error", async () => {
+test("committing with nothing to commit is refused with a readable error", async () => {
   const repo = await makeRepo();
   try {
-    await assert.rejects(() => realCommit(repo, "nothing to commit"), /git commit .* failed/);
+    await assert.rejects(() => realCommit(repo, "nothing to commit"), /nothing to commit/);
+  } finally {
+    await fs.rm(repo, { recursive: true, force: true });
+  }
+});
+
+// ── the security invariant the snapshot exists to enforce ─────────────────────────────────────────
+
+test("SECURITY: repoSnapshot is content-addressed — the reviewed BYTES changing moves the snapshot even when `git status` does not", async () => {
+  const repo = await makeRepo();
+  try {
+    await fs.writeFile(path.join(repo, "a.txt"), "SAFE\n");
+    await run("git", ["add", "-A"], { cwd: repo });
+    await run("git", ["commit", "-q", "-m", "init"], { cwd: repo });
+    await fs.writeFile(path.join(repo, "a.txt"), "REVIEWED\n"); // status becomes ' M a.txt'
+    const before = await repoSnapshot(repo);
+    await fs.writeFile(path.join(repo, "a.txt"), "MALICIOUS\n"); // status STAYS ' M a.txt', bytes differ
+    const after = await repoSnapshot(repo);
+    const status = (await run("git", ["status", "--porcelain=v1", "-uall"], { cwd: repo })).stdout.trim();
+    assert.equal(status, "M a.txt", "the git status classification is unchanged between the two states");
+    assert.notEqual(before, after, "but the content-addressed snapshot MUST change when the reviewed bytes do");
+  } finally {
+    await fs.rm(repo, { recursive: true, force: true });
+  }
+});
+
+test("SECURITY: a commit is bound to the reviewed tree — a concurrent change after review is NOT committed", async () => {
+  const repo = await makeRepo();
+  try {
+    await fs.writeFile(path.join(repo, "a.txt"), "SAFE\n");
+    await run("git", ["add", "-A"], { cwd: repo });
+    await run("git", ["commit", "-q", "-m", "init"], { cwd: repo });
+    await fs.writeFile(path.join(repo, "a.txt"), "REVIEWED\n");
+    const trees = await repoTrees(repo); // capture exactly what the user reviewed
+    await fs.writeFile(path.join(repo, "a.txt"), "MALICIOUS\n"); // an external process changes it after review
+    await commitTree(repo, trees.workTree, trees.head, "commit the reviewed tree");
+    const committed = (await run("git", ["show", "HEAD:a.txt"], { cwd: repo })).stdout.trim();
+    assert.equal(committed, "REVIEWED", "the committed bytes are the reviewed ones, never the concurrent change");
+  } finally {
+    await fs.rm(repo, { recursive: true, force: true });
+  }
+});
+
+test("repoSnapshot also binds new untracked file content", async () => {
+  const repo = await makeRepo();
+  try {
+    await fs.writeFile(path.join(repo, "a.txt"), "one\n");
+    await run("git", ["add", "-A"], { cwd: repo });
+    await run("git", ["commit", "-q", "-m", "init"], { cwd: repo });
+    const base = await repoSnapshot(repo);
+    await fs.writeFile(path.join(repo, "new.txt"), "brand new\n"); // untracked
+    assert.notEqual(base, await repoSnapshot(repo), "an untracked file's content is part of the snapshot");
   } finally {
     await fs.rm(repo, { recursive: true, force: true });
   }
