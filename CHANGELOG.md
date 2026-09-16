@@ -3,6 +3,17 @@
 All notable changes to `@strato-dan/commit` are documented here.
 This project uses [semantic versioning](https://semver.org/).
 
+## [0.2.3] — 2026-09-17
+
+### Security
+- **Prompt-injection boundary on the diff → LLM path.** The repository diff is attacker-controllable and
+  is sent to the model to generate the commit message. The diff is now wrapped in a labeled, per-call
+  **random-token fence** and presented as UNTRUSTED DATA, and the system prompt explicitly forbids
+  following any instruction that appears inside it (e.g. "ignore previous instructions", "reveal the
+  prompt", "run a command"). Defense-in-depth, not a cure — prompt injection isn't fully solvable — but it
+  stops the app from silently handing the model attacker-controlled repository text as if it were a
+  trusted prompt.
+
 ## [0.2.2] — 2026-09-17
 
 ### Security
