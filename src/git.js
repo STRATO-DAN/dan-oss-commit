@@ -4,6 +4,7 @@
 // read as a shell command.
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import crypto from "node:crypto";
 
 const run = promisify(execFile);
 
@@ -74,6 +75,21 @@ export async function currentBranch(cwd) {
   } catch {
     return null; // detached HEAD or something symbolic-ref genuinely can't name — honest null, not a guess
   }
+}
+
+/** A content hash of the EXACT repository state a review is bound to (v0.2): HEAD (or "unborn") plus the
+ *  full `git status --porcelain=v1 -uall` — which includes UNTRACKED files, i.e. everything `git add -A`
+ *  would stage. Any drift (a reviewed file edited, HEAD moved, a new untracked file appearing) changes the
+ *  hash, so the commit endpoint can fail closed if the working tree is no longer what the user reviewed. */
+export async function repoSnapshot(cwd) {
+  let head = "unborn";
+  try {
+    head = (await git(cwd, ["rev-parse", "HEAD"])).trim();
+  } catch {
+    /* fresh repo, unborn HEAD — "unborn" is a real, stable marker */
+  }
+  const status = await git(cwd, ["status", "--porcelain=v1", "-uall"]);
+  return crypto.createHash("sha256").update(`${head}\n${status}`).digest("hex");
 }
 
 export async function hasCommits(cwd) {

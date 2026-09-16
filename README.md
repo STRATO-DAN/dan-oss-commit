@@ -29,8 +29,8 @@ machine against your own git repo.
 npx @strato-dan/commit
 ```
 
-Run it inside any real git repository. It opens `http://127.0.0.1:4870` (loopback only — never
-reachable from another machine) showing:
+Run it inside any real git repository. The CLI prints a URL carrying your access token — open **that**
+URL. It opens on `http://127.0.0.1:4870` (loopback only — never reachable from another machine) showing:
 
 - the real repo/branch you're in
 - the real diff about to be committed (staged changes if any exist, otherwise unstaged)
@@ -105,11 +105,11 @@ dependencies to add:
 npm test
 ```
 
-Observed on the current tree: **12 tests, all passing**.
+Observed on the current tree: **17 tests, all passing**.
 
 ```
-# tests 12
-# pass 12
+# tests 17
+# pass 17
 # fail 0
 ```
 
@@ -133,9 +133,30 @@ export OPENAI_API_KEY=sk-...
 | `DAN_OSS_COMMIT_PORT` | `4870` | Local port |
 | `DAN_OSS_COMMIT_MODEL` | provider default | Model name passed to the API |
 
+## Security model (v0.2)
+
+This surface is a privileged Git-mutation and external-LLM control plane, so locality alone is not the
+trust decision:
+
+- **Bearer token on every `/api/` op** — auto-generated per run, handed to the dashboard in the launch URL,
+  `DAN_OSS_COMMIT_TOKEN` override for agents/CI. Unauthenticated commit / generate / diff / status → **401**.
+  A cross-origin page can't obtain the token, and a `text/plain` simple-POST is refused (**415**).
+- **Snapshot-bound commit** — `/api/diff` returns a hash of the exact repo state (HEAD + full
+  `git status -uall`, so untracked files `git add -A` would stage are included). `/api/commit` requires it
+  and **fails closed with 409** if the working tree drifted since you reviewed — the committed state is the
+  reviewed state.
+- **Serialized commits** (per-repo lock), **rate limits** (→429), **message validation** (control chars /
+  oversize → 422), **real HTTP status codes** (401/409/415/422/429/5xx, never a false 2xx for a failure),
+  and an **append-only audit** (`~/.dan-oss-commit/audit.log`) of commits / generate calls / auth failures.
+- **Honest limit:** a process running as the same OS user can run `git` on the repo directly anyway, so it
+  is inside the boundary by definition; the token defends the browser/CSRF vector and other OS users. A full
+  per-blob content manifest and OS-authenticated IPC are out of scope for this local tier.
+
 ## What it never does
 
 - Never sends your diff anywhere except the LLM API you've configured, with your own key.
+- Never serves a privileged API operation without the bearer token.
+- Never commits a repository state different from the one you reviewed (snapshot fails closed on drift).
 - Never stages files you didn't ask it to (only stages everything if you tick the box, and only
   when the diff shown was unstaged to begin with).
 - Never fabricates a commit message when no API key is set — it tells you plainly instead.
