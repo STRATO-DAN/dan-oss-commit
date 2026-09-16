@@ -45,3 +45,48 @@ test("generateCommitMessage fails honestly on an empty diff, before ever calling
   withEnv({ ANTHROPIC_API_KEY: "sk-ant-fake" }, async () => {
     await assert.rejects(() => generateCommitMessage("   "), /No real changes to describe/);
   }));
+
+// ── LLM-boundary failure modes (rate limits, malformed responses, network errors) ─────────────────
+// No real network call: `global.fetch` is swapped for a fake that behaves like the real failure would.
+
+function withFetch(fakeFetch, fn) {
+  const real = global.fetch;
+  global.fetch = fakeFetch;
+  return Promise.resolve().then(fn).finally(() => { global.fetch = real; });
+}
+
+test("a provider rate-limit response (429) surfaces as a real, readable error — never a fabricated message", () =>
+  withEnv({ ANTHROPIC_API_KEY: "sk-ant-fake" }, () =>
+    withFetch(
+      async () => ({ ok: false, status: 429, text: async () => JSON.stringify({ error: { message: "rate limited" } }) }),
+      async () => {
+        await assert.rejects(() => generateCommitMessage("diff --git a/x b/x"), /Anthropic API error 429/);
+      },
+    )));
+
+test("a malformed (non-JSON) provider response surfaces as a real error, not a crash or a silent empty message", () =>
+  withEnv({ OPENAI_API_KEY: "sk-fake" }, () =>
+    withFetch(
+      async () => ({ ok: true, status: 200, json: async () => { throw new SyntaxError("Unexpected token in JSON"); } }),
+      async () => {
+        await assert.rejects(() => generateCommitMessage("diff --git a/x b/x"), SyntaxError);
+      },
+    )));
+
+test("a well-formed but empty provider response is refused honestly, not passed through as a blank commit message", () =>
+  withEnv({ ANTHROPIC_API_KEY: "sk-ant-fake" }, () =>
+    withFetch(
+      async () => ({ ok: true, status: 200, json: async () => ({ content: [{ text: "" }] }) }),
+      async () => {
+        await assert.rejects(() => generateCommitMessage("diff --git a/x b/x"), /returned an empty response/);
+      },
+    )));
+
+test("a network-level failure (fetch itself throwing — DNS, timeout, connection refused) propagates as a real error", () =>
+  withEnv({ ANTHROPIC_API_KEY: "sk-ant-fake" }, () =>
+    withFetch(
+      async () => { throw new Error("fetch failed: ECONNREFUSED"); },
+      async () => {
+        await assert.rejects(() => generateCommitMessage("diff --git a/x b/x"), /ECONNREFUSED/);
+      },
+    )));
