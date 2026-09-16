@@ -1,6 +1,6 @@
 {
   "name": "@strato-dan/commit",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "[DAN] COMMIT — analyses your staged changes and writes a real commit message from the real diff. One command, no backend to deploy.",
   "license": "MIT",
   "type": "module",

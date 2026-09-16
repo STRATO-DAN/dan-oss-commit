@@ -105,11 +105,13 @@ dependencies to add:
 npm test
 ```
 
-Observed on the current tree: **17 tests, all passing**.
+Observed on the current tree: **20 tests, all passing** — including the security regression that proves
+the content-addressed snapshot: the reviewed bytes changing moves the snapshot even when `git status`
+does not, and a commit is bound to the reviewed tree even if the working tree changes after review.
 
 ```
-# tests 17
-# pass 17
+# tests 20
+# pass 20
 # fail 0
 ```
 
@@ -141,16 +143,19 @@ trust decision:
 - **Bearer token on every `/api/` op** — auto-generated per run, handed to the dashboard in the launch URL,
   `DAN_OSS_COMMIT_TOKEN` override for agents/CI. Unauthenticated commit / generate / diff / status → **401**.
   A cross-origin page can't obtain the token, and a `text/plain` simple-POST is refused (**415**).
-- **Snapshot-bound commit** — `/api/diff` returns a hash of the exact repo state (HEAD + full
-  `git status -uall`, so untracked files `git add -A` would stage are included). `/api/commit` requires it
-  and **fails closed with 409** if the working tree drifted since you reviewed — the committed state is the
-  reviewed state.
+- **Content-addressed, snapshot-bound commit** — `/api/diff` returns a hash of the exact repo **tree**
+  that would be committed: HEAD plus the git tree objects of the staged index and of the working tree
+  after `git add -A` (computed against a throwaway index, so your real index is never touched). Because it
+  hashes the tree, not `git status`, it changes whenever the reviewed **bytes** change — even if a file's
+  status classification stays `M`. `/api/commit` re-checks it and **fails closed with 409** on any drift,
+  then commits that **exact captured tree** via `git commit-tree` — so the committed tree is the reviewed
+  tree even if another process changes the working tree between review and commit (no verify→commit TOCTOU).
 - **Serialized commits** (per-repo lock), **rate limits** (→429), **message validation** (control chars /
   oversize → 422), **real HTTP status codes** (401/409/415/422/429/5xx, never a false 2xx for a failure),
   and an **append-only audit** (`~/.dan-oss-commit/audit.log`) of commits / generate calls / auth failures.
 - **Honest limit:** a process running as the same OS user can run `git` on the repo directly anyway, so it
-  is inside the boundary by definition; the token defends the browser/CSRF vector and other OS users. A full
-  per-blob content manifest and OS-authenticated IPC are out of scope for this local tier.
+  is inside the boundary by definition; the token defends the browser/CSRF vector and other OS users.
+  OS-authenticated IPC and a per-principal identity model are out of scope for this local single-user tier.
 
 ## What it never does
 
