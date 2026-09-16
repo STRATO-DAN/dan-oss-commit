@@ -3,6 +3,17 @@
 All notable changes to `@strato-dan/commit` are documented here.
 This project uses [semantic versioning](https://semver.org/).
 
+## [0.2.2] — 2026-09-17
+
+### Security
+- **HEAD compare-and-swap on commit.** The reviewed-tree commit now binds its `update-ref` to the exact
+  HEAD the snapshot was captured on. If another process (a second terminal, agent, or hook) moves HEAD
+  between review and commit, git refuses the ref update and the commit **aborts with a clear error**
+  instead of building on the reviewed parent and silently overwriting the concurrent commit. Closes the
+  verify→commit HEAD-drift TOCTOU — the internal per-repo mutex only serializes this server, while git
+  can be changed by anything else on the machine, so the ref move itself must be conditional. (0.2.1 bound
+  the committed *tree* to the reviewed content; 0.2.2 binds the *ref move* to the reviewed HEAD.)
+
 ## [0.2.0] — 2026-09-16
 
 ### ⚠️ Security — please upgrade from 0.1.x

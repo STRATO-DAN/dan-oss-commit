@@ -151,6 +151,34 @@ test("SECURITY: a commit is bound to the reviewed tree — a concurrent change a
   }
 });
 
+test("SECURITY: HEAD drift is refused — a concurrent commit that moves HEAD after review aborts the commit (compare-and-swap), never overwriting it", async () => {
+  const repo = await makeRepo();
+  try {
+    await fs.writeFile(path.join(repo, "a.txt"), "SAFE\n");
+    await run("git", ["add", "-A"], { cwd: repo });
+    await run("git", ["commit", "-q", "-m", "init"], { cwd: repo });
+    await fs.writeFile(path.join(repo, "a.txt"), "REVIEWED\n");
+    const trees = await repoTrees(repo); // capture the reviewed state, incl. head = commit A
+
+    // Another process commits, moving HEAD A → B AFTER the review snapshot was captured.
+    await fs.writeFile(path.join(repo, "b.txt"), "concurrent work\n");
+    await run("git", ["add", "-A"], { cwd: repo });
+    await run("git", ["commit", "-q", "-m", "concurrent commit by another process"], { cwd: repo });
+    const headB = (await run("git", ["rev-parse", "HEAD"], { cwd: repo })).stdout.trim();
+
+    // Committing the reviewed tree bound to the now-stale head (A) must be REFUSED — the ref update is a
+    // compare-and-swap, so it cannot silently overwrite the concurrent commit B.
+    await assert.rejects(
+      () => commitTree(repo, trees.workTree, trees.head, "commit the reviewed tree"),
+      /HEAD moved since the reviewed snapshot/,
+    );
+    const headNow = (await run("git", ["rev-parse", "HEAD"], { cwd: repo })).stdout.trim();
+    assert.equal(headNow, headB, "the concurrent commit B must remain HEAD — the stale-based commit was refused, not committed over it");
+  } finally {
+    await fs.rm(repo, { recursive: true, force: true });
+  }
+});
+
 test("repoSnapshot also binds new untracked file content", async () => {
   const repo = await makeRepo();
   try {

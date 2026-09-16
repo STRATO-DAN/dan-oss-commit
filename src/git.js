@@ -156,7 +156,23 @@ export async function commitTree(cwd, tree, head, message) {
   }
   const ctArgs = head ? ["commit-tree", tree, "-p", head, "-m", message] : ["commit-tree", tree, "-m", message];
   const newSha = (await git(cwd, ctArgs)).trim();
-  await git(cwd, ["update-ref", "-m", "dan-oss-commit: commit reviewed tree", "HEAD", newSha]);
+  // Compare-and-swap the ref: bind the update to the SAME HEAD the reviewed tree was built on. If
+  // another process (another terminal, agent, or hook) moved HEAD between the snapshot and now, git
+  // refuses the update (old-value mismatch) and we abort — never overwrite a concurrent commit. The
+  // internal mutex only serializes THIS server; git is free to be changed by anything else on the
+  // machine, so the ref move itself must be conditional. Unborn HEAD (no first commit yet): the all-zero
+  // oid is git's "this ref must not exist yet" sentinel, sized to the repo's hash format (sha1=40,
+  // sha256=64) from newSha's own length so it works on either.
+  const expectedOld = head || "0".repeat(newSha.length);
+  try {
+    await git(cwd, ["update-ref", "-m", "dan-oss-commit: commit reviewed tree", "HEAD", newSha, expectedOld]);
+  } catch (err) {
+    throw new Error(
+      "HEAD moved since the reviewed snapshot was captured — aborting to avoid overwriting concurrent " +
+        "work (the verify→commit HEAD-drift TOCTOU). Re-review against current HEAD and retry. " +
+        `(${err.message})`,
+    );
+  }
   await git(cwd, ["reset", "--mixed", newSha]); // index → new HEAD; working tree untouched
   const sha = (await git(cwd, ["rev-parse", "--short", newSha])).trim();
   return { sha };
