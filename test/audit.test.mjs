@@ -10,7 +10,7 @@ import path from "node:path";
 import http from "node:http";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { makeAudit } from "../src/audit.js";
+import { makeAudit, verifyAudit } from "../src/audit.js";
 import { createServer } from "../src/server.js";
 
 const run = promisify(execFile);
@@ -63,6 +63,66 @@ test("makeAudit is best-effort — a write failure never throws", async () => {
       if (prev === undefined) delete process.env.DAN_OSS_COMMIT_AUDIT; else process.env.DAN_OSS_COMMIT_AUDIT = prev;
     }
     assert.doesNotThrow(() => audit({ action: "commit", sha: "x" }), "an unwritable audit target must never fail the caller's real operation");
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+// ── C5: the audit trail is tamper-evident (hash-chained), owner-only (0600), and fsync'd ───────────
+
+function makeAuditAt(file) {
+  const prev = process.env.DAN_OSS_COMMIT_AUDIT;
+  process.env.DAN_OSS_COMMIT_AUDIT = file;
+  try {
+    return makeAudit();
+  } finally {
+    if (prev === undefined) delete process.env.DAN_OSS_COMMIT_AUDIT; else process.env.DAN_OSS_COMMIT_AUDIT = prev;
+  }
+}
+
+test("C5: the hash-chain verifies intact, the log is owner-only (0600), and an edited past entry is detected", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "dan-oss-commit-c5-"));
+  const file = path.join(dir, "audit.log");
+  try {
+    const write = makeAuditAt(file);
+    assert.equal(write({ action: "commit", sha: "aaa1111" }), true);
+    write({ action: "generate", provider: "anthropic" });
+    write({ action: "auth-failure", path: "/api/status" });
+
+    const intact = verifyAudit(file);
+    assert.equal(intact.ok, true, `an untampered chain must verify (${intact.reason})`);
+    assert.equal(intact.entries, 3);
+
+    if (process.platform !== "win32") {
+      const mode = fsSync.statSync(file).mode & 0o777;
+      assert.equal(mode, 0o600, `the audit log must be created owner-only, got 0${mode.toString(8)}`);
+    }
+
+    // Rewrite a PAST entry's payload in place (keeping its stored hash) — the chain must catch it.
+    const lines = fsSync.readFileSync(file, "utf8").split("\n").filter(Boolean);
+    const forged = JSON.parse(lines[0]);
+    forged.sha = "ffff999";
+    lines[0] = JSON.stringify(forged);
+    fsSync.writeFileSync(file, lines.join("\n") + "\n");
+
+    const tampered = verifyAudit(file);
+    assert.equal(tampered.ok, false, "an in-place edit of a past entry must break the chain");
+    assert.equal(tampered.brokenAt, 0, "verifyAudit points at the exact tampered line");
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("C5: the chain continues unbroken across separate audit sessions (process restarts)", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "dan-oss-commit-c5b-"));
+  const file = path.join(dir, "audit.log");
+  try {
+    makeAuditAt(file)({ action: "commit", sha: "sess1aa" });
+    // a fresh makeAudit() (as a new process would create) must seed from the last line and keep the chain
+    makeAuditAt(file)({ action: "commit", sha: "sess2bb" });
+    const v = verifyAudit(file);
+    assert.equal(v.ok, true, `the chain must span both sessions (${v.reason})`);
+    assert.equal(v.entries, 2);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }

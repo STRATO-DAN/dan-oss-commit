@@ -105,13 +105,15 @@ dependencies to add:
 npm test
 ```
 
-Observed on the current tree: **20 tests, all passing** — including the security regression that proves
-the content-addressed snapshot: the reviewed bytes changing moves the snapshot even when `git status`
-does not, and a commit is bound to the reviewed tree even if the working tree changes after review.
+Observed on the current tree: **48 tests, all passing** — including the security regressions that prove
+the content-addressed snapshot (the reviewed bytes changing moves the snapshot even when `git status`
+does not; a commit is bound to the reviewed tree even if the working tree changes after review), that a
+hostile repo's clean-filter/fsmonitor does not execute on `/api/diff`, that the audit chain catches an
+in-place tamper, and that a durable-but-unsynced commit is still reported truthfully.
 
 ```
-# tests 20
-# pass 20
+# tests 48
+# pass 48
 # fail 0
 ```
 
@@ -134,8 +136,16 @@ export OPENAI_API_KEY=sk-...
 |---|---|---|
 | `DAN_OSS_COMMIT_PORT` | `4870` | Local port |
 | `DAN_OSS_COMMIT_MODEL` | provider default | Model name passed to the API |
+| `DAN_OSS_COMMIT_TOKEN` | fresh per-run token | Fix the instance bearer token (for agents/CI) instead of generating an ephemeral one |
+| `DAN_OSS_COMMIT_AUDIT` | `~/.dan-oss-commit/audit.log` | Audit-log location (hash-chained, `0600`) |
+| `DAN_OSS_COMMIT_MAX_BODY` | `262144` (256 KiB) | Max `/api/` request-body size, in bytes |
+| `DAN_OSS_COMMIT_LLM_TIMEOUT_MS` | `60000` | Hard timeout on the external LLM call |
+| `DAN_OSS_COMMIT_RATE_MAX` | `300` | Max `/api/` requests per minute |
+| `DAN_OSS_COMMIT_WRITE_MAX` | `60` | Max generate/commit requests per minute |
+| `DAN_OSS_COMMIT_OPEN` | (auto-open on) | Set `0`/`false`/`no`/`off` to skip auto-opening a browser |
+| `DAN_OSS_COMMIT_OPENER` | platform default | Override the browser-opener command (headless/CI) |
 
-## Security model (v0.2.3)
+## Security model (v0.4.0)
 
 This surface is a privileged Git-mutation and external-LLM control plane, so locality alone is not the
 trust decision:
@@ -161,9 +171,22 @@ trust decision:
   alone; this stops the app from silently handing the model attacker-controlled repository text as if it
   were a trusted instruction, it does not guarantee the model can never be steered by sufficiently
   sophisticated injected content.
-- **Serialized commits** (per-repo lock), **rate limits** (→429), **message validation** (control chars /
-  oversize → 422), **real HTTP status codes** (401/409/415/422/429/5xx, never a false 2xx for a failure),
-  and an **append-only audit** (`~/.dan-oss-commit/audit.log`) of commits / generate calls / auth failures.
+- **Untrusted-repository hardening (0.4.0)** — a repository is untrusted input, and merely reading one
+  must never become code execution. Git will run an arbitrary command straight out of a repo's own
+  `.git/config` on a plain status/diff/add: `core.fsmonitor`, a `filter.<name>.clean/smudge/process`
+  routed by an in-tree `.gitattributes`, or `diff.external`/a textconv driver. Every git invocation this
+  tool makes now pins `core.fsmonitor` to inert, neutralizes every configured filter to empty via
+  command-line `-c` (which overrides the repo config), and runs content diffs with `--no-ext-diff
+  --no-textconv` — so a hostile repo can't turn a plain `GET /api/diff` into command execution.
+- **Rate limit runs *before* auth (0.4.0)** — the rate check precedes the bearer check, so the
+  unauthenticated 401 path (which writes an audit line) is itself throttled; an unauthenticated flood can
+  no longer drive unbounded audit writes by never presenting a valid token.
+- **Serialized commits** (per-repo lock), **rate limits** (→429), **message validation** (control /
+  bidirectional / invisible chars, incl. Trojan-Source overrides, and oversize → 422), **real HTTP status
+  codes** (401/409/415/422/429/5xx, never a false 2xx for a failure), and a **tamper-evident, owner-only
+  audit** (`~/.dan-oss-commit/audit.log`, hash-chained + `0600` + fsync — see below) of commits / generate
+  calls / auth failures. `/api/diff` captures the reviewed diff and the snapshot that binds it under the
+  same commit mutex, so a concurrent commit can't tear the two apart.
 - **Honest limits, stated directly (not left for a reader to infer):**
   - A process running as the **same OS user** can run `git` on the repo directly anyway, so it is inside
     the boundary by definition; the token defends the browser/CSRF vector and other OS users.
@@ -172,25 +195,35 @@ trust decision:
     configured in your repo do **not** run on the commit this tool creates, and git commit signing
     (GPG/SSH, even if configured via `commit.gpgsign`) is **not** applied automatically. If your workflow
     relies on those, this tool's commits will not carry them — sign or hook-verify separately if that
-    matters to you.
+    matters to you. **This is no longer only documented: every `/api/commit` response now carries
+    `hooksBypassed: true` and `signed: false`**, so a caller is never misled into assuming a hook validated
+    or a signature covers this commit.
   - **The crash window between the three git operations is narrow but real, not fully atomic.** The
     sequence is `commit-tree` → `update-ref` (CAS-bound, see above) → `reset --mixed`. If `commit-tree`
     succeeds and `update-ref` then aborts (the CAS check failed), the created tree/commit objects are
     simply unreachable — nothing is added to your branch history, HEAD is untouched. If `update-ref`
-    succeeds and the following `reset --mixed` then fails (e.g. the process is killed at that exact
-    instant), HEAD has already moved to the new commit but your working tree/index may not yet reflect
-    it — run `git status` and `git reset --mixed HEAD` by hand to resolve that specific, narrow window.
-  - **The diff is sent to your configured LLM provider as-is when you click Generate.** No secret-scanning
-    or redaction is performed on the diff before it's sent — if your uncommitted changes contain a
-    credential or secret, review the diff yourself before clicking Generate, the same way you would
-    before running `git add -A` on anything.
+    succeeds and the following `reset --mixed` then fails (e.g. another process holds `.git/index.lock` at
+    that exact instant), HEAD has already moved to the new commit but your working tree/index may not yet
+    reflect it. **The API tells you the truth in that case rather than returning a bare failure:** the
+    response is a `200` with the real `sha`, `indexResynced: false`, and a `warning` telling you to run
+    `git reset --mixed HEAD` by hand, and the event is audited as `commit-partial` (not silently dropped) —
+    because the commit genuinely landed, and reporting "failed" would imply, falsely, that nothing did.
+  - **The diff is sent to your configured LLM provider as-is when you click Generate.** No redaction, and
+    **no classification/policy gate decides what a diff may contain — that gate is a deliberate product
+    decision, not shipped here.** What the tool does do is *advise*: it runs a lightweight, high-confidence
+    secret-shape scan and returns `secretWarning: true` on the `/api/generate` response when the diff looks
+    like it carries a credential — a non-blocking heads-up, never a block or an edit. Still review the diff
+    yourself before clicking Generate, the same way you would before running `git add -A` on anything.
   - **Rate limits bound request *initiation*, not necessarily total outstanding resource consumption**
     while multiple slow LLM calls are in flight — a real limitation for anyone relying on it as a hard
     resource cap rather than an abuse deterrent.
-  - **The audit log is append-only by convention, not by cryptographic guarantee.** `~/.dan-oss-commit/audit.log`
-    is a plain local file — a process with filesystem access to it can edit or truncate past entries
-    undetected. Treat it as a debugging/ops trail, not as forensic proof against a local attacker who
-    already has filesystem access.
+  - **The audit log is tamper-EVIDENT, not tamper-proof (0.4.0).** `~/.dan-oss-commit/audit.log` is now a
+    hash-chained JSONL file (each line carries the previous line's hash and its own), created owner-only
+    (`0600`), with each line fsync'd before the write completes. Any in-place edit, reorder, or deletion of
+    a past entry breaks the chain and is caught by the exported `verifyAudit()`. What this does **not** stop:
+    a local attacker with filesystem access can still truncate the entire tail and re-chain a forgery from
+    that point — detection of a *silent* edit is the guarantee, not proof against someone who already owns
+    your account. Treat it as an integrity-checkable ops trail, not as forensic evidence against yourself.
 
 ## Threat model — direct answers, including where the answer is "no"
 
@@ -211,11 +244,15 @@ reason it's process-lifetime by default (not persisted) unless you explicitly op
 `DAN_OSS_COMMIT_TOKEN` for CI/agent use — "ephemeral" describes the *default*, not a guarantee that
 holds once you've opted out of it. It is never put in `sessionStorage` or any other browser storage
 — the dashboard reads it once from the URL into an in-memory JS variable and attaches it as a
-header on each `/api/` call, so there's no persisted-storage read surface to defend at all, but the
-URL-transport itself has real, named leak vectors: shell/terminal scrollback if the URL is ever
-echoed, the OS process list while the launching command runs, and browser history if you ever
-bookmark or revisit the dashboard tab instead of closing it — treat the launch URL itself as a
-one-time credential, the same way you'd treat a magic sign-in link.
+header on each `/api/` call, so there's no persisted-storage read surface to defend at all. The
+CLI no longer prints the token to stdout on its normal path (0.4.0) — terminal scrollback, shell
+history, and captured logs were a real leak surface, so stdout now carries only the non-secret base
+address and the browser is handed the token-bearing URL directly; the full URL is echoed *only* as a
+fallback when the browser can't be opened automatically, or when you opt out of auto-open. Two named
+residual vectors remain: the OS process list while the opener command runs (the token rides in its
+argv — bounded by being ephemeral and gone on exit), and browser history if you ever bookmark or
+revisit the dashboard tab instead of closing it. Treat the launch URL itself as a one-time credential,
+the same way you'd treat a magic sign-in link.
 
 **Why "commit failed" can never mean HEAD already moved.** The ref update *is* the compare-and-swap
 — `update-ref HEAD <new> <expectedOld>` either lands atomically (HEAD moved to the new commit, full
@@ -249,24 +286,34 @@ diagram of this tool draws exactly one gate in front of everything behind it, an
 
 **Which claims are enforced by code vs. only asserted in docs.** Enforced, verifiably, by a real
 test today: bearer-token 401 on every `/api/` op, 415 on non-JSON Content-Type, snapshot-hash 409
-on drift, HEAD-CAS abort on concurrent commit, control-character/oversize message 422, rate-limit
-429, LLM-call timeout, and `auditOk` reflecting a real write outcome. Asserted in this document but
-*not* independently enforced by a test today: hook/signing non-execution (true by construction —
-`commit-tree` structurally cannot invoke them — but no regression test proves it stays true if the
-commit path is ever refactored), and the full "if X is compromised" table above (each row's *code*
-behavior is real; the table itself is documentation, not something CI checks against drift).
+on drift, HEAD-CAS abort on concurrent commit, control/bidirectional/invisible-character and oversize
+message 422, rate-limit 429 *and* that it runs before auth, LLM-call timeout, `auditOk` reflecting a
+real write outcome, the hostile-repo git hardening (a repo clean-filter/fsmonitor that does **not**
+execute on `GET /api/diff`), the tamper-evident audit chain + `0600` mode, the truthful `200 +
+commit-partial` reporting of a durable-but-unsynced commit, the `hooksBypassed`/`signed` disclosure
+flags on every commit, the lowered request-body cap, and the advisory `secretWarning`. Asserted in
+this document but *not* independently enforced by a test today: hook/signing non-*execution* itself
+(true by construction — `commit-tree` structurally cannot invoke them — the flags that *disclose* it
+are tested, but nothing proves the structural fact stays true if the commit path is ever refactored),
+and the full "if X is compromised" table above (each row's *code* behavior is real; the table itself
+is documentation, not something CI checks against drift).
 
-**Test coverage, honestly, not just "tests exist."** 35 real tests today. Covered with a real,
+**Test coverage, honestly, not just "tests exist."** 48 real tests today. Covered with a real,
 adversarial test: concurrent Git process racing a commit (HEAD-drift CAS), content-addressed
 snapshot drift, a broken audit target under real HTTP load (both the pre-existing "never blocks
-the operation" invariant and the new `auditOk` surfacing), a hung LLM provider (real abort, timed),
-and the prompt-injection containment boundary. **Not tested, named directly rather than left
-implicit:** a process-kill/crash simulated at the update-ref→reset-mixed boundary specifically (the
-code path is reasoned about, above, not exercised by a real kill -9); a malicious git hook actually
-firing and mutating state (moot only because hooks don't run via this path, not exercised);
-repository-local git config changing between snapshot and commit; and a literal "browser session
-replay" test (there's no session construct to replay — the token is a flat credential, tested as
-one).
+the operation" invariant and the `auditOk` surfacing), a hung LLM provider (real abort, timed),
+the prompt-injection containment boundary, a **hostile repo whose clean-filter and fsmonitor are
+proven not to run on `/api/diff`**, an audit chain **verified intact and then caught after an
+in-place tamper**, a **durable commit whose index resync is forced to fail (real `.git/index.lock`)
+and is still reported truthfully and audited**, and the CLI **spawned to prove the token never
+reaches stdout**. **Not tested, named directly rather than left implicit:** a process-kill/crash
+simulated at the update-ref→reset-mixed boundary specifically (the resync-failure path is exercised
+via a held lock, above, but not a real kill -9 at that instant); a malicious git hook actually firing
+and mutating state (moot only because hooks don't run via this path, not exercised); and a literal
+"browser session replay" test (there's no session construct to replay — the token is a flat
+credential, tested as one). The `/api/diff` diff+snapshot capture is serialized under the commit mutex
+and guarded by a concurrency/consistency test, though a deterministic single-interleaving race repro
+would need a test-only hook and is not attempted.
 
 **The remaining specific questions, answered directly, not folded into the table above:**
 - *Why treat the diff as untrusted only inside the LLM prompt, not throughout the whole pipeline?*
@@ -295,18 +342,16 @@ one).
   already inside the trust boundary (see the table above: "another local process, same OS user" is
   the one thing this tier doesn't defend against), so this is a real, named non-goal, not a missed
   case.
-- *Why is the request body limit (40 MiB) dramatically larger than the diff size actually useful to
-  the LLM (truncated at 60,000 characters)?* Because `/api/commit` and `/api/diff` carry a full
-  repo snapshot hash plus commit message, not just a diff, and the body-size guard is one shared
-  limit across every `/api/` endpoint, not an LLM-specific one — 40 MiB is the honest ceiling for
-  "a real repo's diff could legitimately be this big," and the *LLM* path's own, much smaller
-  60,000-character truncation is a separate, later cutoff applied only to what gets sent externally.
-  **Named honestly, not hidden:** the full body — up to 40 MiB — is read into memory before that
-  truncation happens, so an oversized `/api/generate` request does cost real memory proportional to
-  what was sent, not to the 60,000 characters that eventually reach the model. This is a real,
-  present resource-cost gap for a caller with the token (already covered by the "no capability
-  separation" / "authenticated local caller" answers above — the caller is trusted, so this is not
-  independently defended against beyond the flat 40 MiB ceiling).
+- *Why was the request body limit (previously 40 MiB) dramatically larger than the diff size actually
+  useful to the LLM (truncated at 60,000 characters)?* It shouldn't have been, and as of 0.4.0 it
+  isn't: the shared `/api/` body cap is now a modest **256 KiB** default (configurable via
+  `DAN_OSS_COMMIT_MAX_BODY`), comfortably above a JSON-escaped ~60 KB diff plus the snapshot-hash and
+  commit-message envelope, and it is enforced *at read time* — an oversized body is refused, not
+  buffered whole into memory first. The old 40 MiB ceiling meant an authenticated caller could make the
+  process buffer 40 MiB for a payload the model would never see past ~60 KB; lowering it bounds that
+  memory cost. It is a memory bound, **not** a policy on what a diff may contain (that classification
+  gate is a product decision, deliberately not shipped). A caller with the token who legitimately needs a
+  larger body can raise the env var.
 
 **Is this a real security architecture, or safeguards around a single-user localhost trust model?**
 The honest answer is the second one, and that's a legitimate, named design tier for what this tool

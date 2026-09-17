@@ -3,6 +3,61 @@
 All notable changes to `@strato-dan/commit` are documented here.
 This project uses [semantic versioning](https://semver.org/).
 
+## [0.4.0] — 2026-09-17
+
+A second adversarial-audit pass, closing nine confirmed findings with real fixes (each covered by a
+regression test that fails on the prior code and passes on this one). Some of these turn a previously
+*documented* limitation into an enforced guarantee. Zero runtime dependencies, still.
+
+### Security
+- **Untrusted-repository hardening (C6).** A repository is untrusted input: `core.fsmonitor`, a
+  `filter.<name>.clean/smudge/process` routed by an in-tree `.gitattributes`, or `diff.external`/a
+  textconv driver can each make plain `git` run an arbitrary command out of the repo's own `.git/config`
+  — so a plain `GET /api/diff` against a hostile clone was command execution. Every git invocation now
+  pins `core.fsmonitor` to inert, neutralizes every configured filter to empty via command-line `-c`, and
+  runs content diffs with `--no-ext-diff --no-textconv`. Regression test: a repo clean-filter/fsmonitor
+  that writes a marker is proven **not** to run on `/api/diff`.
+- **Truthful reporting of a durable-but-unsynced commit (C1).** The commit sequence is `commit-tree` →
+  `update-ref` (CAS) → `reset --mixed`. Once `update-ref` moves HEAD the commit is durable, but a failing
+  `reset` (e.g. a held `.git/index.lock`) previously surfaced as a bare `500 "failed"` with no audit line
+  — implying, falsely, that nothing was committed. `/api/commit` now returns `200` with the real `sha`,
+  `indexResynced: false`, and a `warning` to run `git reset --mixed HEAD`, and audits the event as
+  `commit-partial`. Genuine pre-HEAD-move failures still return a real error, now also audited.
+- **Hook/signing bypass disclosed on the API, not just in docs (C2).** Every `/api/commit` response now
+  carries `hooksBypassed: true` and `signed: false`, so a caller can't be misled into assuming a repo
+  hook validated or a signature covers a `commit-tree`-created commit.
+- **Rate limit runs before auth (C3).** The rate check now precedes the bearer check, so the
+  unauthenticated 401 path — which writes an audit line — is itself throttled; an unauthenticated flood
+  can no longer drive unbounded audit writes.
+- **Tamper-evident, owner-only audit log (C5).** `~/.dan-oss-commit/audit.log` is now hash-chained (each
+  line carries the previous line's hash and its own), created `0600`, and fsync'd per line. A new exported
+  `verifyAudit()` detects any in-place edit, reorder, or deletion of a past entry. (A local attacker who
+  can truncate the whole tail and re-chain a forgery is still out of scope — detection of a *silent* edit
+  is the guarantee.)
+- **Message validator rejects Trojan-Source and invisible characters (C8).** Beyond C0 controls + DEL, a
+  commit message is now rejected (422) if it contains bidirectional overrides/isolates (U+202A–202E,
+  U+2066–2069), NEL (U+0085), line/paragraph separators (U+2028/2029), or a zero-width space (U+200B).
+- **The access token is kept off stdout (C7).** The CLI no longer prints the token (or the token-bearing
+  URL) to stdout on its normal path — it hands the URL to the browser directly and prints only the
+  non-secret base address; the full URL is echoed only as a fallback when the browser can't be opened, or
+  when auto-open is disabled. Auto-open is now controllable via `DAN_OSS_COMMIT_OPEN` /
+  `DAN_OSS_COMMIT_OPENER`. Residual argv exposure to the process list is documented.
+- **`/api/diff` captures the diff and its binding snapshot atomically (C9).** Both are now read inside the
+  same commit mutex (from one `repoTrees` capture), so a concurrent commit on this server can't move the
+  repository between the two reads.
+
+### Changed
+- **Request-body cap lowered from 40 MiB to a 256 KiB default (C4),** configurable via
+  `DAN_OSS_COMMIT_MAX_BODY`, and enforced at read time (an oversized body is refused, not buffered whole).
+  This bounds memory cost; it is not a policy on diff content.
+
+### Added
+- **Advisory secret-shape warning (C4).** `/api/generate` returns `secretWarning: true` when the diff
+  looks like it carries a credential (AWS keys, provider API keys, PEM private-key headers, etc.) — a
+  non-blocking heads-up before the diff leaves the machine. It never blocks, redacts, or alters the diff.
+  A diff-content classification/policy gate remains a deliberate product decision, not shipped here.
+- Documented every `DAN_OSS_COMMIT_*` environment variable (several were previously undocumented).
+
 ## [0.3.0] — 2026-09-17
 
 Follow-through on the full external 80-question adversarial review — the two remaining items with a

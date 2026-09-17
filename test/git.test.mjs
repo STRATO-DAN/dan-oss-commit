@@ -179,6 +179,41 @@ test("SECURITY: HEAD drift is refused — a concurrent commit that moves HEAD af
   }
 });
 
+// ── C1: the commit is durable once update-ref moves HEAD, even if the index resync then fails ──────
+test("C1: a failed index resync after update-ref still reports the durable commit, never a lost-commit error", async () => {
+  const repo = await makeRepo();
+  try {
+    await fs.writeFile(path.join(repo, "a.txt"), "SAFE\n");
+    await run("git", ["add", "-A"], { cwd: repo });
+    await run("git", ["commit", "-q", "-m", "init"], { cwd: repo });
+    const head0 = (await run("git", ["rev-parse", "HEAD"], { cwd: repo })).stdout.trim();
+    await fs.writeFile(path.join(repo, "a.txt"), "REVIEWED\n");
+    const trees = await repoTrees(repo);
+
+    // Hold .git/index.lock: `git reset --mixed` (the index resync) fails, but commit-tree and update-ref
+    // (which actually moves HEAD) still succeed — the exact window the finding describes.
+    const lock = path.join(repo, ".git", "index.lock");
+    await fs.writeFile(lock, "");
+    let result;
+    try {
+      result = await commitTree(repo, trees.workTree, trees.head, "commit the reviewed tree");
+    } finally {
+      await fs.rm(lock, { force: true });
+    }
+
+    const headNow = (await run("git", ["rev-parse", "HEAD"], { cwd: repo })).stdout.trim();
+    assert.notEqual(headNow, head0, "HEAD really moved to the new commit — it is durable");
+    const shortNow = (await run("git", ["rev-parse", "--short", "HEAD"], { cwd: repo })).stdout.trim();
+    assert.equal(result.sha, shortNow, "the reported sha is the real, durable HEAD — not raised as a failure");
+    assert.equal(result.indexResynced, false, "the failed resync is reported honestly");
+    assert.match(result.warning, /git reset --mixed HEAD/, "the caller is told how to resync by hand");
+    assert.equal(result.hooksBypassed, true, "C2: hook-bypass is flagged on every commit result");
+    assert.equal(result.signed, false, "C2: unsigned is flagged on every commit result");
+  } finally {
+    await fs.rm(repo, { recursive: true, force: true });
+  }
+});
+
 test("repoSnapshot also binds new untracked file content", async () => {
   const repo = await makeRepo();
   try {

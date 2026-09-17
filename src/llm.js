@@ -96,6 +96,26 @@ async function callOpenAI(apiKey, diff) {
   return data.choices?.[0]?.message?.content?.trim() ?? "";
 }
 
+// 🔴 C4 — advisory secret scan, NOT a gate. The diff is sent to your configured external provider as-is
+// (documented in the README's threat model), and no policy decides what a diff may contain — that
+// classification gate is a product decision, deliberately not shipped here. What this does is cheaply
+// flag the obvious high-confidence secret shapes so the caller can be WARNED before the diff leaves the
+// machine; it never blocks, redacts, or alters the diff. Patterns are assembled from fragments so this
+// source file itself carries no literal that trips a secret scanner.
+const SECRET_PATTERNS = [
+  new RegExp("AKIA" + "[0-9A-Z]{12,}"), // AWS access key id
+  new RegExp("sk-" + "[A-Za-z0-9]{20,}"), // provider-style API key (OpenAI/Anthropic shape)
+  new RegExp("ghp_" + "[A-Za-z0-9]{20,}"), // GitHub personal access token
+  new RegExp("xox[baprs]-" + "[A-Za-z0-9-]{10,}"), // Slack token
+  new RegExp("-----BEGIN [A-Z ]{0,20}PRIVATE KEY"), // PEM private key header
+  new RegExp("(?:api[_-]?key|secret|token|passwd|password)[\"'\\s]*[:=][\"'\\s]*[A-Za-z0-9_\\-]{16,}", "i"),
+];
+
+/** Best-effort: does this diff visibly contain something shaped like a credential? Advisory only. */
+export function looksLikeSecret(diff) {
+  return SECRET_PATTERNS.some((re) => re.test(diff));
+}
+
 /** Which provider to use is decided by which real key is actually set — no default provider
  * baked in, since defaulting to one vendor for everyone would be a real, unwanted tie-in. */
 export function configuredProvider() {
@@ -130,5 +150,7 @@ export async function generateCommitMessage(diff) {
   if (!text) {
     throw new Error(`${provider} returned an empty response — try again.`);
   }
-  return { message: text, provider, truncated };
+  // Advisory: warn (never block) if the diff that was just sent looks like it carried a credential, so the
+  // caller can double-check what left the machine. Scans the real diff, before truncation.
+  return { message: text, provider, truncated, secretWarning: looksLikeSecret(diff) };
 }
