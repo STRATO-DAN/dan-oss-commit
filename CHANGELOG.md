@@ -3,6 +3,35 @@
 All notable changes to `@strato-dan/commit` are documented here.
 This project uses [semantic versioning](https://semver.org/).
 
+## [0.5.0] — 2026-09-17
+
+A behavior-changing release: the diff→LLM secret scan is promoted from an advisory warning to a real,
+deny-by-default **gate**. Zero runtime dependencies, still.
+
+### Changed
+- **Secret detection is now a gate, not just advice (BREAKING for the `/api/generate` contract).** In
+  0.4.x the tool scanned the diff and returned `secretWarning: true` but sent the diff to your configured
+  provider regardless. It now **blocks the outbound LLM call** the moment a high-confidence secret shape is
+  detected: `/api/generate` returns **422** with `secretBlocked: true` and a `patterns` list naming the
+  matched pattern *types* (never the secret value), and no request is made to the provider. Set
+  `DAN_OSS_COMMIT_ALLOW_SECRETS=1` (or `true`/`yes`) to downgrade back to the 0.4.x advisory behavior and
+  send the diff anyway — the response then carries `secretWarning: true` and `secretPatterns` as before.
+
+### Added
+- **Self-contained secret scanner (`src/secrets.js`).** Zero-dependency, linear regexes only (no
+  backtracking / ReDoS risk on an adversarial diff), covering AWS access key ids, PEM private-key blocks,
+  `sk-`/`sk_live_`/`rk_live_` provider & Stripe keys, GitHub classic and fine-grained tokens, Google API
+  keys, Slack tokens, JWTs, and generic quoted `password`/`secret`/`token`/`api_key` assignments. Exposes
+  `detectSecrets(text)` which returns only the matched pattern **type names**, never the matched text.
+- **`DAN_OSS_COMMIT_ALLOW_SECRETS`** environment variable (see above).
+
+### Security
+- **The diff no longer leaves the machine when it visibly carries a credential** — the previous "advisory
+  only, sent anyway" behavior was the documented gap; it is now closed by default. Regression tests prove a
+  fake AWS key, a fake `sk-` provider key, and a private-key block are each blocked with **no** LLM call,
+  that the error/response never contains the secret value, that the opt-in env downgrades the block to the
+  advisory path, and that a clean diff proceeds untouched.
+
 ## [0.4.0] — 2026-09-17
 
 A security-hardening release closing nine findings, each with a regression test that fails on the prior

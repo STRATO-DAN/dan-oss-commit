@@ -6,6 +6,10 @@
 // to a fabricated commit message.
 
 import { randomUUID } from "node:crypto";
+import { detectSecrets, looksLikeSecret } from "./secrets.js";
+
+// Re-exported for callers/tests that import the advisory boolean from this module's public surface.
+export { looksLikeSecret };
 
 // An external LLM call with no timeout hangs the request indefinitely if the provider never
 // responds — a real, previously-unbounded resource-exhaustion vector (a hung outstanding request
@@ -96,24 +100,18 @@ async function callOpenAI(apiKey, diff) {
   return data.choices?.[0]?.message?.content?.trim() ?? "";
 }
 
-// 🔴 C4 — advisory secret scan, NOT a gate. The diff is sent to your configured external provider as-is
-// (documented in the README's threat model), and no policy decides what a diff may contain — that
-// classification gate is a product decision, deliberately not shipped here. What this does is cheaply
-// flag the obvious high-confidence secret shapes so the caller can be WARNED before the diff leaves the
-// machine; it never blocks, redacts, or alters the diff. Patterns are assembled from fragments so this
-// source file itself carries no literal that trips a secret scanner.
-const SECRET_PATTERNS = [
-  new RegExp("AKIA" + "[0-9A-Z]{12,}"), // AWS access key id
-  new RegExp("sk-" + "[A-Za-z0-9]{20,}"), // provider-style API key (OpenAI/Anthropic shape)
-  new RegExp("ghp_" + "[A-Za-z0-9]{20,}"), // GitHub personal access token
-  new RegExp("xox[baprs]-" + "[A-Za-z0-9-]{10,}"), // Slack token
-  new RegExp("-----BEGIN [A-Z ]{0,20}PRIVATE KEY"), // PEM private key header
-  new RegExp("(?:api[_-]?key|secret|token|passwd|password)[\"'\\s]*[:=][\"'\\s]*[A-Za-z0-9_\\-]{16,}", "i"),
-];
+// 🔒 Secret gate (0.5.0) — the diff→LLM boundary is now DENY-BY-DEFAULT. Detection lives in the
+// self-contained, zero-dependency `secrets.js` scanner (linear regexes only); this file decides the
+// POLICY: if the diff visibly carries a credential, the outbound provider call is blocked outright and
+// `generateCommitMessage` throws before anything leaves the machine. The pre-0.5 advisory behavior (warn,
+// but send the diff anyway) is still available as an explicit opt-in via DAN_OSS_COMMIT_ALLOW_SECRETS.
 
-/** Best-effort: does this diff visibly contain something shaped like a credential? Advisory only. */
-export function looksLikeSecret(diff) {
-  return SECRET_PATTERNS.some((re) => re.test(diff));
+// Opt-in override: `1` / `true` / `yes` (case-insensitive) downgrades the block to the advisory warning
+// and proceeds. Read per-call, like every other DAN_OSS_COMMIT_* env var here — never cached at module
+// load, so a caller (or a test) can actually toggle it.
+function secretsAllowed() {
+  const v = String(process.env.DAN_OSS_COMMIT_ALLOW_SECRETS || "").trim().toLowerCase();
+  return v === "1" || v === "true" || v === "yes";
 }
 
 /** Which provider to use is decided by which real key is actually set — no default provider
@@ -136,6 +134,24 @@ export async function generateCommitMessage(diff) {
   if (!diff.trim()) {
     throw new Error("No real changes to describe — the diff is empty.");
   }
+
+  // 🔒 Secret gate — runs BEFORE the diff is handed to the external provider. Deny by default: if the
+  // real diff visibly carries a credential, the outbound LLM call is blocked entirely and this throws a
+  // clear error that names only the matched pattern TYPES (never the secret text). Set
+  // DAN_OSS_COMMIT_ALLOW_SECRETS=1 to downgrade to the advisory behavior and send the diff anyway.
+  // Scans the full diff, before truncation, so a secret past the 60 KB mark is still caught.
+  const matchedPatterns = detectSecrets(diff);
+  if (matchedPatterns.length > 0 && !secretsAllowed()) {
+    const err = new Error(
+      `refusing to send this diff to ${provider}: it appears to contain ` +
+        `${matchedPatterns.length === 1 ? "a secret" : "secrets"} (matched: ${matchedPatterns.join(", ")}). ` +
+        "Remove the credential from your changes, or set DAN_OSS_COMMIT_ALLOW_SECRETS=1 to override and send the diff anyway."
+    );
+    err.secretBlocked = true;
+    err.patterns = matchedPatterns; // pattern NAMES only — safe to surface and audit
+    throw err;
+  }
+
   // A huge diff is truncated with an honest marker, never silently dropped without saying so —
   // the model still gets to see the real start of the change, not nothing.
   const MAX_CHARS = 60000;
@@ -150,7 +166,14 @@ export async function generateCommitMessage(diff) {
   if (!text) {
     throw new Error(`${provider} returned an empty response — try again.`);
   }
-  // Advisory: warn (never block) if the diff that was just sent looks like it carried a credential, so the
-  // caller can double-check what left the machine. Scans the real diff, before truncation.
-  return { message: text, provider, truncated, secretWarning: looksLikeSecret(diff) };
+  // Advisory metadata: reaching here with matches means the gate was explicitly opted out — the caller is
+  // still told the diff looked credential-shaped. `secretWarning` (boolean) is kept for backwards compat;
+  // `secretPatterns` names the matched types (never the secret values).
+  return {
+    message: text,
+    provider,
+    truncated,
+    secretWarning: matchedPatterns.length > 0,
+    secretPatterns: matchedPatterns,
+  };
 }

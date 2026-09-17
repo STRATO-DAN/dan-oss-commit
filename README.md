@@ -142,6 +142,7 @@ export OPENAI_API_KEY=sk-...
 | `DAN_OSS_COMMIT_LLM_TIMEOUT_MS` | `60000` | Hard timeout on the external LLM call |
 | `DAN_OSS_COMMIT_RATE_MAX` | `300` | Max `/api/` requests per minute |
 | `DAN_OSS_COMMIT_WRITE_MAX` | `60` | Max generate/commit requests per minute |
+| `DAN_OSS_COMMIT_ALLOW_SECRETS` | (unset — gate on) | Set `1`/`true`/`yes` to downgrade the deny-by-default [secret gate](#secret-gate) to a non-blocking advisory warning |
 | `DAN_OSS_COMMIT_OPEN` | (auto-open on) | Set `0`/`false`/`no`/`off` to skip auto-opening a browser |
 | `DAN_OSS_COMMIT_OPENER` | platform default | Override the browser-opener command (headless/CI) |
 
@@ -208,12 +209,14 @@ trust decision:
     response is a `200` with the real `sha`, `indexResynced: false`, and a `warning` telling you to run
     `git reset --mixed HEAD` by hand, and the event is audited as `commit-partial` (not silently dropped) —
     because the commit genuinely landed, and reporting "failed" would imply, falsely, that nothing did.
-  - **The diff is sent to your configured LLM provider as-is when you click Generate.** No redaction, and
-    **no classification/policy gate decides what a diff may contain — that gate is a deliberate product
-    decision, not shipped here.** What the tool does do is *advise*: it runs a lightweight, high-confidence
-    secret-shape scan and returns `secretWarning: true` on the `/api/generate` response when the diff looks
-    like it carries a credential — a non-blocking heads-up, never a block or an edit. Still review the diff
-    yourself before clicking Generate, the same way you would before running `git add -A` on anything.
+  - **The diff is sent to your configured LLM provider when you click Generate — but not if it visibly
+    carries a credential.** As of 0.5.0 a lightweight, high-confidence secret-shape scan is a
+    **deny-by-default gate**: if the diff matches a known secret shape, the outbound provider call is
+    **blocked** and `/api/generate` returns **422** naming the matched pattern *types* (never the secret
+    value). Set `DAN_OSS_COMMIT_ALLOW_SECRETS=1` to downgrade to the pre-0.5 advisory behavior (a
+    non-blocking `secretWarning`, diff sent anyway). The gate is high-signal, not exhaustive — it is no
+    substitute for reviewing the diff yourself before clicking Generate, the same way you would before
+    running `git add -A` on anything. See [Secret gate](#secret-gate) for the full pattern list and limits.
   - **Rate limits bound request *initiation*, not necessarily total outstanding resource consumption**
     while multiple slow LLM calls are in flight — a real limitation for anyone relying on it as a hard
     resource cap rather than an abuse deterrent.
@@ -224,6 +227,33 @@ trust decision:
     a local attacker with filesystem access can still truncate the entire tail and re-chain a forgery from
     that point — detection of a *silent* edit is the guarantee, not proof against someone who already owns
     your account. Treat it as an integrity-checkable ops trail, not as forensic evidence against yourself.
+
+## Secret gate
+
+The diff you review is sent to your configured LLM provider to write the commit message. Since 0.5.0 that
+boundary is **deny-by-default**: before the diff leaves the machine, a self-contained, zero-dependency
+scanner (`src/secrets.js`) checks it for high-confidence secret shapes. If any match, `/api/generate`
+**blocks the provider call** and returns **422** with `secretBlocked: true` and a `patterns` array naming
+the matched pattern *types* — never the secret value, which is never echoed, logged, or audited.
+
+Detected shapes (all matched with linear, backtracking-free regexes, so a hostile diff can't stall the
+scan):
+
+- AWS access key ids (`AKIA…`)
+- PEM private-key blocks (`-----BEGIN … PRIVATE KEY-----`, incl. RSA/EC/OPENSSH/DSA/PGP)
+- Provider API keys (`sk-…`) and Stripe live/restricted keys (`sk_live_…`, `rk_live_…`)
+- GitHub tokens — classic (`ghp_`/`gho_`/`ghr_`/`ghs_`/`ghu_`) and fine-grained (`github_pat_…`)
+- Google API keys (`AIza…`), Slack tokens (`xox[baprs]-…`), and JWTs (`eyJ….….…`)
+- Generic quoted assignments — `password`/`passwd`/`secret`/`token`/`api_key` set to a quoted 8+ char value
+
+**Opt out per your own judgement.** Set `DAN_OSS_COMMIT_ALLOW_SECRETS=1` (or `true`/`yes`) to downgrade the
+block to the pre-0.5 advisory behavior: the diff is sent anyway and the response carries a non-blocking
+`secretWarning: true` plus `secretPatterns`.
+
+**Honest limits.** The scan is high-signal, not exhaustive — it targets common, well-shaped credentials and
+will miss a bespoke or unusually formatted secret, and it can occasionally flag a benign string that merely
+looks credential-shaped. It is a safety net that stops the obvious foot-gun (a key pasted straight into a
+tracked file reaching an external API), not a guarantee that no secret can ever leave. Review your own diff.
 
 ## Threat model — direct answers, including where the answer is "no"
 

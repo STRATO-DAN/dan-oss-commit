@@ -117,9 +117,10 @@ test("prompt-injection boundary: the untrusted diff is fenced + labeled, the sys
     );
   }));
 
-// ── C4: an advisory (non-blocking) warning when the diff looks like it carries a secret ────────────
-test("C4: looksLikeSecret flags credential-shaped content and leaves ordinary diffs alone", () => {
-  // Assembled from fragments so this test file itself carries no literal a secret scanner would trip on.
+// ── secret gate (0.5.0): deny-by-default at the diff→LLM boundary, with an explicit opt-in override ──
+// Fake credentials are assembled from fragments so this test file itself carries no literal a secret
+// scanner would trip on.
+test("looksLikeSecret flags credential-shaped content and leaves ordinary diffs alone", () => {
   const awsKey = "AKIA" + "ABCDEFGH" + "IJKLMNOP";
   const openaiKey = "sk-" + "aBcD1234".repeat(3);
   assert.equal(looksLikeSecret(`+aws_key = ${awsKey}`), true);
@@ -127,18 +128,102 @@ test("C4: looksLikeSecret flags credential-shaped content and leaves ordinary di
   assert.equal(looksLikeSecret("+const total = subtotal + tax;"), false);
 });
 
-test("C4: generateCommitMessage returns secretWarning:true for a secret-shaped diff, but never blocks generation", () =>
-  withEnv({ ANTHROPIC_API_KEY: "sk-ant-fake" }, () =>
-    withFetch(
-      async () => ({ ok: true, status: 200, json: async () => ({ content: [{ text: "Add config" }] }) }),
-      async () => {
-        const awsKey = "AKIA" + "ABCDEFGH" + "IJKLMNOP";
-        const flagged = await generateCommitMessage(`diff --git a/config b/config\n+aws_key = ${awsKey}\n`);
-        assert.equal(flagged.secretWarning, true, "a credential-shaped diff is flagged");
-        assert.equal(flagged.message, "Add config", "generation is advisory-only — never blocked or redacted");
+// A fetch that records whether it was called, so a test can prove the LLM was NEVER contacted.
+function withCountingFetch(reply, fn) {
+  const real = global.fetch;
+  let calls = 0;
+  global.fetch = async (...args) => {
+    calls += 1;
+    return reply(...args);
+  };
+  return Promise.resolve()
+    .then(() => fn(() => calls))
+    .finally(() => { global.fetch = real; });
+}
 
-        const clean = await generateCommitMessage("diff --git a/x b/x\n+const n = 1;\n");
-        assert.equal(clean.secretWarning, false, "an ordinary diff is not flagged");
+test("GATE (default on): a diff containing a fake AWS key is BLOCKED before any LLM call", () =>
+  withEnv({ ANTHROPIC_API_KEY: "sk-ant-fake", DAN_OSS_COMMIT_ALLOW_SECRETS: undefined }, () =>
+    withCountingFetch(
+      async () => ({ ok: true, status: 200, json: async () => ({ content: [{ text: "should never be reached" }] }) }),
+      async (calls) => {
+        const awsKey = "AKIA" + "ABCDEFGH" + "IJKLMNOP";
+        const diff = `diff --git a/config b/config\n+aws_key = ${awsKey}\n`;
+        await assert.rejects(
+          () => generateCommitMessage(diff),
+          (err) => {
+            assert.equal(err.secretBlocked, true, "the error is tagged as a secret block");
+            assert.ok(err.patterns.includes("aws-access-key-id"), "the matched pattern type is named");
+            assert.match(err.message, /aws-access-key-id/, "the error names the pattern type");
+            // 🔴 the error must NEVER echo the secret value itself.
+            assert.ok(!err.message.includes(awsKey), "the error body must not contain the secret value");
+            return true;
+          },
+        );
+        assert.equal(calls(), 0, "the external LLM must not be called when a secret is detected");
+      },
+    )));
+
+test("GATE (default on): a diff containing a fake OpenAI sk- key is BLOCKED, naming the type, not the value", () =>
+  withEnv({ ANTHROPIC_API_KEY: "sk-ant-fake", DAN_OSS_COMMIT_ALLOW_SECRETS: undefined }, () =>
+    withCountingFetch(
+      async () => ({ ok: true, status: 200, json: async () => ({ content: [{ text: "nope" }] }) }),
+      async (calls) => {
+        const key = "sk-" + "aBcD1234".repeat(3);
+        await assert.rejects(
+          () => generateCommitMessage(`diff --git a/x b/x\n+const c = new Client("${key}");\n`),
+          (err) => {
+            assert.equal(err.secretBlocked, true);
+            assert.ok(err.patterns.includes("openai-api-key"));
+            assert.ok(!err.message.includes(key), "the error body must not contain the secret value");
+            return true;
+          },
+        );
+        assert.equal(calls(), 0, "no LLM call on a blocked diff");
+      },
+    )));
+
+test("GATE (default on): a private-key block is BLOCKED before any LLM call", () =>
+  withEnv({ OPENAI_API_KEY: "sk-fake", DAN_OSS_COMMIT_ALLOW_SECRETS: undefined }, () =>
+    withCountingFetch(
+      async () => ({ ok: true, status: 200, json: async () => ({ choices: [{ message: { content: "nope" } }] }) }),
+      async (calls) => {
+        const pem = "-----BEGIN " + "RSA " + "PRIVATE KEY-----";
+        await assert.rejects(
+          () => generateCommitMessage(`diff --git a/id_rsa b/id_rsa\n+${pem}\n`),
+          (err) => {
+            assert.equal(err.secretBlocked, true);
+            assert.ok(err.patterns.includes("private-key-block"));
+            return true;
+          },
+        );
+        assert.equal(calls(), 0, "no LLM call on a blocked diff");
+      },
+    )));
+
+test("GATE opt-out (DAN_OSS_COMMIT_ALLOW_SECRETS=1): the same secret diff PROCEEDS, advisory-only", () =>
+  withEnv({ ANTHROPIC_API_KEY: "sk-ant-fake", DAN_OSS_COMMIT_ALLOW_SECRETS: "1" }, () =>
+    withCountingFetch(
+      async () => ({ ok: true, status: 200, json: async () => ({ content: [{ text: "Add config" }] }) }),
+      async (calls) => {
+        const awsKey = "AKIA" + "ABCDEFGH" + "IJKLMNOP";
+        const result = await generateCommitMessage(`diff --git a/config b/config\n+aws_key = ${awsKey}\n`);
+        assert.equal(result.message, "Add config", "with the opt-in set, generation proceeds");
+        assert.equal(result.secretWarning, true, "it is still flagged as advisory");
+        assert.ok(result.secretPatterns.includes("aws-access-key-id"), "the advisory names the matched type");
+        assert.equal(calls(), 1, "the LLM IS called when the gate is explicitly opted out");
+      },
+    )));
+
+test("GATE: a clean diff proceeds normally, with no secret warning", () =>
+  withEnv({ ANTHROPIC_API_KEY: "sk-ant-fake", DAN_OSS_COMMIT_ALLOW_SECRETS: undefined }, () =>
+    withCountingFetch(
+      async () => ({ ok: true, status: 200, json: async () => ({ content: [{ text: "Add helper" }] }) }),
+      async (calls) => {
+        const result = await generateCommitMessage("diff --git a/x b/x\n+const n = 1;\n");
+        assert.equal(result.message, "Add helper");
+        assert.equal(result.secretWarning, false, "an ordinary diff is not flagged");
+        assert.deepEqual(result.secretPatterns, []);
+        assert.equal(calls(), 1, "a clean diff reaches the LLM");
       },
     )));
 
