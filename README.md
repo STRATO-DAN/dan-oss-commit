@@ -135,7 +135,7 @@ export OPENAI_API_KEY=sk-...
 | `DAN_OSS_COMMIT_PORT` | `4870` | Local port |
 | `DAN_OSS_COMMIT_MODEL` | provider default | Model name passed to the API |
 
-## Security model (v0.2)
+## Security model (v0.2.3)
 
 This surface is a privileged Git-mutation and external-LLM control plane, so locality alone is not the
 trust decision:
@@ -150,12 +150,47 @@ trust decision:
   status classification stays `M`. `/api/commit` re-checks it and **fails closed with 409** on any drift,
   then commits that **exact captured tree** via `git commit-tree` — so the committed tree is the reviewed
   tree even if another process changes the working tree between review and commit (no verify→commit TOCTOU).
+- **HEAD compare-and-swap (0.2.2)** — the commit's ref update is bound to the exact HEAD the snapshot was
+  captured on (`update-ref HEAD <new> <expectedOld>`). If HEAD moves between review and commit (another
+  terminal, agent, or hook), git itself refuses the update and the commit **aborts with a clear error**
+  instead of building on the reviewed parent and silently overwriting a concurrent commit.
+- **Diff → LLM prompt-injection boundary (0.2.3)** — the repository diff is attacker-controllable and is
+  sent to the model to generate the commit message. It's wrapped in a labeled, per-call random-token fence
+  and presented as UNTRUSTED DATA; the system prompt explicitly forbids following any instruction that
+  appears inside it. **Defense-in-depth, not a cure** — prompt injection isn't fully solvable by a fence
+  alone; this stops the app from silently handing the model attacker-controlled repository text as if it
+  were a trusted instruction, it does not guarantee the model can never be steered by sufficiently
+  sophisticated injected content.
 - **Serialized commits** (per-repo lock), **rate limits** (→429), **message validation** (control chars /
   oversize → 422), **real HTTP status codes** (401/409/415/422/429/5xx, never a false 2xx for a failure),
   and an **append-only audit** (`~/.dan-oss-commit/audit.log`) of commits / generate calls / auth failures.
-- **Honest limit:** a process running as the same OS user can run `git` on the repo directly anyway, so it
-  is inside the boundary by definition; the token defends the browser/CSRF vector and other OS users.
-  OS-authenticated IPC and a per-principal identity model are out of scope for this local single-user tier.
+- **Honest limits, stated directly (not left for a reader to infer):**
+  - A process running as the **same OS user** can run `git` on the repo directly anyway, so it is inside
+    the boundary by definition; the token defends the browser/CSRF vector and other OS users.
+    OS-authenticated IPC and a per-principal identity model are out of scope for this local single-user tier.
+  - **`commit-tree` bypasses git's normal porcelain.** `commit-msg`, `pre-commit`, and `pre-push` hooks
+    configured in your repo do **not** run on the commit this tool creates, and git commit signing
+    (GPG/SSH, even if configured via `commit.gpgsign`) is **not** applied automatically. If your workflow
+    relies on those, this tool's commits will not carry them — sign or hook-verify separately if that
+    matters to you.
+  - **The crash window between the three git operations is narrow but real, not fully atomic.** The
+    sequence is `commit-tree` → `update-ref` (CAS-bound, see above) → `reset --mixed`. If `commit-tree`
+    succeeds and `update-ref` then aborts (the CAS check failed), the created tree/commit objects are
+    simply unreachable — nothing is added to your branch history, HEAD is untouched. If `update-ref`
+    succeeds and the following `reset --mixed` then fails (e.g. the process is killed at that exact
+    instant), HEAD has already moved to the new commit but your working tree/index may not yet reflect
+    it — run `git status` and `git reset --mixed HEAD` by hand to resolve that specific, narrow window.
+  - **The diff is sent to your configured LLM provider as-is when you click Generate.** No secret-scanning
+    or redaction is performed on the diff before it's sent — if your uncommitted changes contain a
+    credential or secret, review the diff yourself before clicking Generate, the same way you would
+    before running `git add -A` on anything.
+  - **Rate limits bound request *initiation*, not necessarily total outstanding resource consumption**
+    while multiple slow LLM calls are in flight — a real limitation for anyone relying on it as a hard
+    resource cap rather than an abuse deterrent.
+  - **The audit log is append-only by convention, not by cryptographic guarantee.** `~/.dan-oss-commit/audit.log`
+    is a plain local file — a process with filesystem access to it can edit or truncate past entries
+    undetected. Treat it as a debugging/ops trail, not as forensic proof against a local attacker who
+    already has filesystem access.
 
 ## What it never does
 
