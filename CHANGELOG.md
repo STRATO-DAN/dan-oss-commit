@@ -3,6 +3,39 @@
 All notable changes to `@strato-dan/commit` are documented here.
 This project uses [semantic versioning](https://semver.org/).
 
+## [0.6.0] — 2026-09-17
+
+A purely **additive** polish release — no change to any existing command, route, or response. Launcher
+ergonomics, a defined exit-code contract, and a `Makefile` for the common developer/CI tasks. Zero
+runtime dependencies, still.
+
+### Added
+- **Launcher flags on `bin/dan-oss-commit.js`** (hand-rolled arg parse, no dependency):
+  - `--version` — print the version from `package.json` and exit `0`.
+  - `--help` / `-h` — print usage, the environment variables, and the exit-code contract, then exit `0`.
+  - `--json` — print the startup banner as a single JSON object `{url, port, mode, dataDir}` instead of
+    the human-readable banner (the human default is unchanged). The access token is deliberately **not**
+    included — same leak-surface reasoning as the human path; it still reaches the browser via the opener.
+- **Defined process exit-code contract**, documented in `--help` and the README:
+  - `0` normal operation (also `--help` / `--version`),
+  - `1` startup failure — e.g. the port is already in use (`EADDRINUSE`) or the data directory is unusable,
+  - `2` invalid command-line usage (an unknown option).
+- **`Makefile`** with `make help`, and:
+  - `make test` — the full suite (`node --test test/*.test.mjs`).
+  - `make attack` — only the adversarial + secret-gate suites (`test/security.test.mjs test/secrets.test.mjs`).
+  - `make demo` — a reproducible, offline demo (throwaway repo): read a real staged diff via the library
+    the UI itself calls, then trip the deny-by-default secret gate with a fake, credential-shaped line
+    scanned by the exported `detectSecrets` / `looksLikeSecret`. No network, no API key.
+  - `make bench` — secret-scan throughput over a ~1 MB synthetic diff (elapsed ms + MB/s), demonstrating
+    linear-time, ReDoS-safe scanning. Stdlib only.
+- **`BENCHMARKS.md`** with real `make bench` numbers and a one-line reproduce/machine note.
+
+### Changed
+- **Startup failures now print one clear stderr line and exit non-zero (`1`)** instead of surfacing a raw
+  stack trace. Port-in-use, an unusable data directory, and a late server `error` event are all handled;
+  `listen()` now rejects on a bind error so the launcher can report it cleanly. No behavior change to any
+  running route.
+
 ## [0.5.0] — 2026-09-17
 
 A behavior-changing release: the diff→LLM secret scan is promoted from an advisory warning to a real,

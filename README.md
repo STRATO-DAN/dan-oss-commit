@@ -38,6 +38,33 @@ URL. It opens on `http://127.0.0.1:4870` (loopback only — never reachable from
 - a **Commit** button that runs the real `git commit` with whatever message is in the box —
   generated, edited, or written from scratch
 
+## Scriptable & CI
+
+The launcher takes a few hand-rolled flags (no dependency) so it drops cleanly into scripts and CI:
+
+```bash
+npx @strato-dan/commit --version   # print the version and exit 0
+npx @strato-dan/commit --help      # usage, env vars, and the exit-code contract; exit 0
+npx @strato-dan/commit --json      # startup banner as ONE JSON object, instead of the human banner
+```
+
+`--json` prints a single object — `{"url": "...", "port": 4870, "mode": "browser", "dataDir": "..."}`
+— so a wrapper can read the address without scraping human text. `mode` is `browser` normally or
+`headless` when auto-open is disabled (`DAN_OSS_COMMIT_OPEN=0`); `dataDir` is where the hash-chained
+audit log lives. As on the human path, the access token is never printed — it reaches the browser via
+the opener.
+
+**Exit codes** (also printed by `--help`):
+
+| Code | Meaning |
+|---|---|
+| `0` | Normal operation (also `--help` / `--version`) |
+| `1` | Startup failure — e.g. the port is already in use, or the data directory is unusable. One stderr line, never a raw stack |
+| `2` | Invalid command-line usage — an unknown option |
+
+Common tasks are wrapped in a `Makefile` (`make help` lists them): `make test`, `make attack`,
+`make demo`, `make bench`.
+
 ## Examples
 
 [`examples/read-diff-and-generate.mjs`](examples/read-diff-and-generate.mjs) uses this package's
@@ -116,6 +143,12 @@ in-place tamper, and that a durable-but-unsynced commit is still reported truthf
 # pass 48
 # fail 0
 ```
+
+**Try the attacks:** `make attack` runs only the adversarial surface — the 401/415/409-CAS/422/429,
+oversize-body and hostile-repo regressions plus the deny-by-default secret gate and the linear-time,
+ReDoS-safe secret scan — so you can watch the tool refuse the things it's supposed to refuse. `make
+demo` is a reproducible, offline walk-through (read a real diff, then trip the secret gate), and `make
+bench` measures secret-scan throughput — see [BENCHMARKS.md](BENCHMARKS.md).
 
 ## Requirements
 
@@ -439,6 +472,9 @@ built — `configuredProvider()` picks one deterministically, it doesn't call bo
 | `public/` | The plain HTML/CSS/vanilla-JS frontend served at `127.0.0.1`. |
 | `examples/` | Runnable example code using the library functions directly, no UI. |
 | `test/` | Real unit + integration tests (`npm test`, Node's own built-in test runner) — against a real temporary git repo, not a mocked one. |
+| `Makefile` | Developer/CI entry points — `make help`, `test`, `attack`, `demo`, `bench`. |
+| `scripts/` | Guard hooks and the `make demo` / `make bench` runners. |
+| [`BENCHMARKS.md`](BENCHMARKS.md) | Real secret-scan throughput numbers (`make bench`). |
 
 ## FAQ
 
