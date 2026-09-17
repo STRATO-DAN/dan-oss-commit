@@ -116,3 +116,30 @@ test("prompt-injection boundary: the untrusted diff is fenced + labeled, the sys
       },
     );
   }));
+
+// ── a hung provider must not hang the caller forever ────────────────────────────────────────────
+test("a provider that never responds is aborted after the configured timeout, not left hanging forever", () =>
+  withEnv({ ANTHROPIC_API_KEY: "sk-ant-fake", DAN_OSS_COMMIT_LLM_TIMEOUT_MS: "50" }, () =>
+    withFetch(
+      // A real fetch given an AbortSignal rejects with an AbortError once that signal fires —
+      // this fake does the same, so the test proves the REAL abort wiring, not just that some
+      // promise eventually settles.
+      (_url, opts) =>
+        new Promise((_resolve, reject) => {
+          opts.signal.addEventListener("abort", () => {
+            const err = new Error("The operation was aborted");
+            err.name = "AbortError";
+            reject(err);
+          });
+        }),
+      async () => {
+        const start = Date.now();
+        await assert.rejects(
+          () => generateCommitMessage("diff --git a/x b/x"),
+          /LLM request timed out after 50ms \(DAN_OSS_COMMIT_LLM_TIMEOUT_MS\)/,
+        );
+        // A real bound, not just an error message: the call must not have run anywhere near the
+        // old "forever" behavior. 2s of slack covers slow CI without weakening what's being proven.
+        assert.ok(Date.now() - start < 2000, "must abort near the configured timeout, not hang");
+      },
+    )));

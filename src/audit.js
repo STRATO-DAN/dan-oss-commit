@@ -15,14 +15,20 @@ export function makeAudit() {
   } catch {
     /* best-effort */
   }
+  // Returns true/false so a caller can surface "did this event actually get recorded?" in its own
+  // response — the write itself still never throws and never blocks the real operation (an audit
+  // failure was always meant to degrade the audit trail, not the security-relevant action it
+  // describes), but until now that failure was invisible to anything outside a stderr line.
   return function audit(event) {
     try {
       fs.appendFileSync(file, JSON.stringify({ ts: new Date().toISOString(), ...event }) + "\n");
+      return true;
     } catch (err) {
       if (!warned) {
         warned = true;
         console.error(`[DAN] COMMIT: audit write failed (events not being recorded): ${err.message}`);
       }
+      return false;
     }
   };
 }

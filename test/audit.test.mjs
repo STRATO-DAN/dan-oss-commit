@@ -172,6 +172,54 @@ test("AUDIT: a successful commit really produces a commit entry with the real sh
   }
 });
 
+test("AUDIT: a real commit succeeds even when the audit target is unwritable, and honestly reports auditOk:false", async () => {
+  const repo = await makeRepo();
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "dan-oss-commit-audit-"));
+  // Same "point the audit file AT a directory" technique as the unit-level write-failure test
+  // above, but exercised end-to-end over real HTTP through the real commit path — proving the
+  // SERVER's own response, not just makeAudit() in isolation, honestly reflects the broken trail.
+  const badTarget = path.join(dir, "is-a-dir");
+  fsSync.mkdirSync(badTarget);
+  const { server, port, token } = await startWithAudit(repo, badTarget);
+  try {
+    await fs.writeFile(path.join(repo, "a.txt"), "hello\n");
+    await run("git", ["add", "a.txt"], { cwd: repo });
+    const diff = await req(port, "GET", "/api/diff", { token });
+    const result = await req(port, "POST", "/api/commit", { token, body: { message: "m", snapshot: diff.json.snapshot } });
+    assert.equal(result.status, 200, "an unwritable audit target must never fail the real commit — same invariant as the unit test above");
+    assert.ok(result.json.ok, "the commit itself must still be reported as a real success");
+    assert.equal(result.json.auditOk, false, "but the caller must be able to SEE that the audit trail is broken, not just this process's own stderr");
+    const headSha = (await run("git", ["rev-parse", "--short", "HEAD"], { cwd: repo })).stdout.trim();
+    assert.equal(result.json.sha, headSha, "the commit really happened on disk regardless of the audit failure");
+  } finally {
+    stop(server);
+    await fs.rm(repo, { recursive: true, force: true });
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("AUDIT: a real generate call reports auditOk:true when the audit target is healthy", async () => {
+  const repo = await makeRepo();
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "dan-oss-commit-audit-"));
+  const auditFile = path.join(dir, "audit.log");
+  const prevA = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = "sk-ant-fake";
+  const realFetch = global.fetch;
+  global.fetch = async () => ({ ok: true, status: 200, json: async () => ({ content: [{ text: "Fix the widget" }] }) });
+  const { server, port, token } = await startWithAudit(repo, auditFile);
+  try {
+    const r = await req(port, "POST", "/api/generate", { token, body: { diff: "diff --git a/x b/x" } });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.auditOk, true, "a healthy audit target must report auditOk:true, not just be silent about it");
+  } finally {
+    stop(server);
+    global.fetch = realFetch;
+    if (prevA === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = prevA;
+    await fs.rm(repo, { recursive: true, force: true });
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("AUDIT: an LLM-boundary failure (no key configured) really produces a generate-failed entry on disk", async () => {
   const repo = await makeRepo();
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "dan-oss-commit-audit-"));
