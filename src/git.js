@@ -11,9 +11,52 @@ import path from "node:path";
 
 const run = promisify(execFile);
 
-async function git(cwd, args, extraEnv) {
+// ── hostile-repository hardening (v0.2.4) ─────────────────────────────────────────────────────────
+//
+// 🔴 A repository is untrusted input. Merely READING it (/api/diff, the snapshot) must never become
+// code execution. Git will happily run an arbitrary command out of a repo's OWN .git/config on a plain
+// status/diff/add:
+//   • core.fsmonitor = <cmd>            → runs on essentially every index-reading command.
+//   • filter.<name>.clean|smudge|process = <cmd>, routed by an in-tree .gitattributes → runs when
+//     git converts worktree↔blob (add, and the worktree/index comparison inside diff and status).
+//   • diff.external / a textconv driver → runs while producing a content diff.
+// A command-line `-c` overrides whatever the repo's config says, so we pin the fsmonitor to inert and
+// neutralize every configured filter to empty; content diffs additionally pass --no-ext-diff/--no-textconv.
+// This keeps the tool's own git invocations honest regardless of what the cloned repo tries to smuggle in.
+
+const _filterOverridesByCwd = new Map(); // resolved cwd -> ["-c","filter.x.clean=", ...]
+
+/** Enumerate every configured git filter (repo-local + global) and build `-c filter.<name>.<op>=`
+ *  overrides that disable each clean/smudge/process command. A pure `git config` read triggers no
+ *  filter and no fsmonitor, so this is itself safe to run against a hostile repo. Memoized per cwd. */
+async function filterOverrides(cwd) {
+  const key = path.resolve(cwd);
+  const cached = _filterOverridesByCwd.get(key);
+  if (cached) return cached;
+  let flags = [];
   try {
-    const { stdout } = await run("git", args, {
+    const { stdout } = await run(
+      "git",
+      ["-c", "core.fsmonitor=", "config", "--name-only", "--get-regexp", "^filter\\."],
+      { cwd, maxBuffer: 1024 * 1024, env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1" } },
+    );
+    flags = stdout
+      .split("\n")
+      .map((s) => s.trim())
+      .filter((k) => /\.(clean|smudge|process)$/.test(k))
+      .flatMap((k) => ["-c", `${k}=`]);
+  } catch {
+    flags = []; // not a repo, or no filters configured — nothing to neutralize
+  }
+  _filterOverridesByCwd.set(key, flags);
+  return flags;
+}
+
+async function git(cwd, args, extraEnv) {
+  // Static + per-repo hardening prepended to EVERY git call this module makes.
+  const hardening = ["-c", "core.fsmonitor=", ...(await filterOverrides(cwd))];
+  try {
+    const { stdout } = await run("git", [...hardening, ...args], {
       cwd,
       maxBuffer: 1024 * 1024 * 32,
       env: extraEnv ? { ...process.env, ...extraEnv } : process.env,
@@ -21,7 +64,8 @@ async function git(cwd, args, extraEnv) {
     return stdout;
   } catch (err) {
     // A real git failure (not a repo, git missing, bad ref) carries useful stderr — surface
-    // it rather than swallowing it into a generic "something went wrong".
+    // it rather than swallowing it into a generic "something went wrong". The original args (not the
+    // hardening flags) are echoed, so the error stays readable.
     const detail = err.stderr?.trim() || err.message;
     throw new Error(`git ${args.join(" ")} failed: ${detail}`);
   }
@@ -40,16 +84,20 @@ export async function isRepo(cwd) {
  * Never both silently combined: the caller is told which one it got, so "nothing staged, used
  * unstaged instead" is a visible fact, not a guess. */
 export async function realDiff(cwd) {
-  const staged = await git(cwd, ["diff", "--staged"]);
+  // --no-ext-diff/--no-textconv: never let a repo's diff.external or a textconv driver execute while
+  // we render its own diff (part of the hostile-repo hardening above).
+  const staged = await git(cwd, ["diff", "--no-ext-diff", "--no-textconv", "--staged"]);
   if (staged.trim()) {
     return { diff: staged, source: "staged" };
   }
-  const unstaged = await git(cwd, ["diff"]);
+  const unstaged = await git(cwd, ["diff", "--no-ext-diff", "--no-textconv"]);
   return { diff: unstaged, source: unstaged.trim() ? "unstaged" : "none" };
 }
 
 export async function changedFiles(cwd, source) {
-  const args = source === "staged" ? ["diff", "--staged", "--name-status"] : ["diff", "--name-status"];
+  const args = source === "staged"
+    ? ["diff", "--no-ext-diff", "--no-textconv", "--staged", "--name-status"]
+    : ["diff", "--no-ext-diff", "--no-textconv", "--name-status"];
   const out = await git(cwd, args);
   return out
     .split("\n")
@@ -167,15 +215,33 @@ export async function commitTree(cwd, tree, head, message) {
   try {
     await git(cwd, ["update-ref", "-m", "dan-oss-commit: commit reviewed tree", "HEAD", newSha, expectedOld]);
   } catch (err) {
+    // update-ref IS the compare-and-swap. If it fails, HEAD never moved and nothing landed on the
+    // branch (the commit-tree object is simply unreachable) — safe to abort with a real error.
     throw new Error(
       "HEAD moved since the reviewed snapshot was captured — aborting to avoid overwriting concurrent " +
         "work (the verify→commit HEAD-drift TOCTOU). Re-review against current HEAD and retry. " +
         `(${err.message})`,
     );
   }
-  await git(cwd, ["reset", "--mixed", newSha]); // index → new HEAD; working tree untouched
+  // 🔴 C1 — past this line the commit is DURABLE: update-ref has moved HEAD to newSha. The reset below
+  // only resyncs the index/worktree to the new HEAD; it is NOT the commit. If it fails (e.g. another
+  // process holds .git/index.lock at this instant), the commit still happened and HEAD still points at
+  // it. We must therefore report the truth — the real sha plus a warning that the index needs a manual
+  // resync — never raise as if nothing was committed. `rev-parse` needs no index lock, so it is safe here.
   const sha = (await git(cwd, ["rev-parse", "--short", newSha])).trim();
-  return { sha };
+  // 🔴 C2 — commit-tree deliberately bypasses git's porcelain: no commit-msg/pre-commit/pre-push hook
+  // runs on this commit, and commit.gpgsign signing is NOT applied. Surfaced on every result so a caller
+  // is never misled into thinking a hook validated or a signature covers this commit.
+  const result = { sha, hooksBypassed: true, signed: false, indexResynced: true };
+  try {
+    await git(cwd, ["reset", "--mixed", newSha]); // index → new HEAD; working tree untouched
+  } catch (err) {
+    result.indexResynced = false;
+    result.warning =
+      `commit ${sha} landed on HEAD, but syncing the index/working tree to it failed — ` +
+      `run \`git reset --mixed HEAD\` by hand to resync. (${err.message})`;
+  }
+  return result;
 }
 
 /** Convenience: capture the reviewed tree and commit exactly it. Used off the server request path
