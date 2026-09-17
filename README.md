@@ -209,7 +209,20 @@ so. It's transported once, in the launch URL, because that's the one channel ava
 zero-install local CLI with no prior trust relationship to establish a session over; the same
 reason it's process-lifetime by default (not persisted) unless you explicitly opt into
 `DAN_OSS_COMMIT_TOKEN` for CI/agent use — "ephemeral" describes the *default*, not a guarantee that
-holds once you've opted out of it.
+holds once you've opted out of it. It is never put in `sessionStorage` or any other browser storage
+— the dashboard reads it once from the URL into an in-memory JS variable and attaches it as a
+header on each `/api/` call, so there's no persisted-storage read surface to defend at all, but the
+URL-transport itself has real, named leak vectors: shell/terminal scrollback if the URL is ever
+echoed, the OS process list while the launching command runs, and browser history if you ever
+bookmark or revisit the dashboard tab instead of closing it — treat the launch URL itself as a
+one-time credential, the same way you'd treat a magic sign-in link.
+
+**Why "commit failed" can never mean HEAD already moved.** The ref update *is* the compare-and-swap
+— `update-ref HEAD <new> <expectedOld>` either lands atomically (HEAD moved to the new commit, full
+success) or git refuses it outright (HEAD untouched, the endpoint returns a real error). There's no
+third state where the API can report failure after HEAD already changed, because git itself won't
+perform a HEAD move that isn't backed by the exact expected prior value. What "success" means is
+exactly that one atomic transition; it never means "some of the git operations ran."
 
 **The four trust roots are the same principal, not four independent ones.** The bearer token, the
 audit log's authority, the repository state, and (since commit-tree bypasses signing) the identity
@@ -226,6 +239,7 @@ diagram of this tool draws exactly one gate in front of everything behind it, an
 **Per-scenario: what still holds, stated plainly.**
 | If this is compromised/malicious… | …this still holds | …this does not |
 |---|---|---|
+| Localhost trust itself (if this were ever reachable beyond `127.0.0.1`) | The bearer token is still required on every `/api/` op regardless of how the request arrived — it is not solely a "you're on loopback" check | The loopback bind is real defense-in-depth today (`Never listens on anything but 127.0.0.1`, above); this tool has no separate mechanism for a non-loopback deployment, so that scenario is out of scope, not silently assumed safe |
 | The browser origin | The token can't be read by a different origin; a non-JSON POST is refused (415) | Nothing, once the token itself is obtained from *within* the origin — see "the browser" row below |
 | The repository content (a diff) | The prompt-injection fence contains injected text as data, tested; it can only ever influence the *generated commit message string*, never which tree gets committed (that's computed independently, from real git objects, before the message is even generated) | The fence is not a proof against a sufficiently sophisticated model-steering attempt — defense-in-depth, not a cure |
 | Local git configuration (hooks, signing config) | The committed tree's *content* is still the exact reviewed bytes (content-addressed, CAS-bound) | Hooks and signing configured in the repo do not run via this tool's commit path at all — see the honest limits above |
@@ -281,6 +295,18 @@ one).
   already inside the trust boundary (see the table above: "another local process, same OS user" is
   the one thing this tier doesn't defend against), so this is a real, named non-goal, not a missed
   case.
+- *Why is the request body limit (40 MiB) dramatically larger than the diff size actually useful to
+  the LLM (truncated at 60,000 characters)?* Because `/api/commit` and `/api/diff` carry a full
+  repo snapshot hash plus commit message, not just a diff, and the body-size guard is one shared
+  limit across every `/api/` endpoint, not an LLM-specific one — 40 MiB is the honest ceiling for
+  "a real repo's diff could legitimately be this big," and the *LLM* path's own, much smaller
+  60,000-character truncation is a separate, later cutoff applied only to what gets sent externally.
+  **Named honestly, not hidden:** the full body — up to 40 MiB — is read into memory before that
+  truncation happens, so an oversized `/api/generate` request does cost real memory proportional to
+  what was sent, not to the 60,000 characters that eventually reach the model. This is a real,
+  present resource-cost gap for a caller with the token (already covered by the "no capability
+  separation" / "authenticated local caller" answers above — the caller is trusted, so this is not
+  independently defended against beyond the flat 40 MiB ceiling).
 
 **Is this a real security architecture, or safeguards around a single-user localhost trust model?**
 The honest answer is the second one, and that's a legitimate, named design tier for what this tool
