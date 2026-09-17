@@ -3,6 +3,33 @@
 All notable changes to `@strato-dan/commit` are documented here.
 This project uses [semantic versioning](https://semver.org/).
 
+## [0.3.0] — 2026-09-17
+
+Follow-through on the full external 80-question adversarial review — the two remaining items with a
+proportionate real fix for this tool's tier, plus a direct, honest threat-model answer to everything
+else the review raised (previously answered by ~26 of 80; now 0 left silent — some by fix, most by
+explicit disclosure).
+
+### Added
+- **A hard timeout on the LLM call** (`DAN_OSS_COMMIT_LLM_TIMEOUT_MS`, default 60000ms). A provider
+  that never responds previously hung the request indefinitely — real `AbortController`-based abort,
+  read per-call so it's actually configurable, not cached at import time.
+- **`auditOk` in the `/api/commit` and `/api/generate` responses.** The audit log was always
+  best-effort (a write failure never blocks the real operation — unchanged, still tested), but the
+  failure was previously visible only in this process's own stderr. The caller can now see whether
+  the event was durably recorded.
+
+### Documentation
+- A full "Threat model" section: what the bearer token actually authenticates (possession, not
+  identity); that the four trust roots (token, audit, repo state, signing identity) collapse to one
+  principal; that there is no capability separation; a per-scenario "what still holds" table (browser
+  compromised / repo malicious / local git config malicious / another local process / LLM compromised
+  / crash at the worst instant); which claims are code-enforced vs. only asserted; an honest test-
+  coverage account (what's exercised by a real adversarial test today vs. named-but-not-tested); and
+  a direct answer to whether this is a real security architecture or safeguards around a single-user
+  localhost trust model (the honest answer is the second one, stated as a legitimate design tier, not
+  a hedge).
+
 ## [0.2.3] — 2026-09-17
 
 ### Security

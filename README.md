@@ -192,6 +192,105 @@ trust decision:
     undetected. Treat it as a debugging/ops trail, not as forensic proof against a local attacker who
     already has filesystem access.
 
+## Threat model — direct answers, including where the answer is "no"
+
+This tool got a genuinely hard, 80-question external adversarial review. Roughly a quarter had
+real fixes shipped in response (0.2.1–0.2.3, above). This section answers the rest directly — real
+fixes where there's a proportionate one for a zero-dependency, single-user local tool (two shipped
+in this pass: a hard timeout on the LLM call, and the audit log's success/failure now surfaced in
+the API response instead of only in stderr — see `auditOk` above) — and an honest, stated boundary
+everywhere else, rather than silence. Silence is what makes a security claim untrustworthy; a
+disclosed limit does not.
+
+**What the token actually is.** It authenticates *possession*, not a human, a person, or a browser
+session — whoever holds the string can perform every privileged operation this tool exposes. There
+is no cryptographic proof that a human clicked "Commit" versus a script that has the token doing
+so. It's transported once, in the launch URL, because that's the one channel available to a
+zero-install local CLI with no prior trust relationship to establish a session over; the same
+reason it's process-lifetime by default (not persisted) unless you explicitly opt into
+`DAN_OSS_COMMIT_TOKEN` for CI/agent use — "ephemeral" describes the *default*, not a guarantee that
+holds once you've opted out of it.
+
+**The four trust roots are the same principal, not four independent ones.** The bearer token, the
+audit log's authority, the repository state, and (since commit-tree bypasses signing) the identity
+behind any commit this tool creates are all, in the end, whoever is running this process as your OS
+user. That's not an oversight the architecture is hiding — it's the honest shape of a local,
+single-user tool. If you need those to be independently verifiable principals, this tool's tier
+doesn't provide that.
+
+**There is no capability separation.** Read-only diff inspection, LLM generation, commit creation,
+and ref mutation all sit behind the one bearer-token check. Possess the token and you can do all
+four; there's no narrower-scoped token for "just read the diff." Named directly because a
+diagram of this tool draws exactly one gate in front of everything behind it, and that's accurate.
+
+**Per-scenario: what still holds, stated plainly.**
+| If this is compromised/malicious… | …this still holds | …this does not |
+|---|---|---|
+| The browser origin | The token can't be read by a different origin; a non-JSON POST is refused (415) | Nothing, once the token itself is obtained from *within* the origin — see "the browser" row below |
+| The repository content (a diff) | The prompt-injection fence contains injected text as data, tested; it can only ever influence the *generated commit message string*, never which tree gets committed (that's computed independently, from real git objects, before the message is even generated) | The fence is not a proof against a sufficiently sophisticated model-steering attempt — defense-in-depth, not a cure |
+| Local git configuration (hooks, signing config) | The committed tree's *content* is still the exact reviewed bytes (content-addressed, CAS-bound) | Hooks and signing configured in the repo do not run via this tool's commit path at all — see the honest limits above |
+| Another local process, same OS user | Nothing — that process is already inside the trust boundary by definition (see "trust roots," above) | Everything; this is the one you can't defend against at this tier |
+| The external LLM provider | The repository's real tree/commit path never depends on what the LLM returns — a malicious/compromised response can only become a bad commit *message*, generation is a 502 on any provider error | The message text itself, obviously — review what you're about to commit |
+| A process crash at the worst instant | HEAD is CAS-bound (a torn commit-tree→update-ref never lands); a torn update-ref→reset-mixed leaves a real commit with a stale index, recoverable by hand (see the crash-window note above) | Nothing beyond that one specific narrow window — it is not fully transactional across all three steps |
+
+**Which claims are enforced by code vs. only asserted in docs.** Enforced, verifiably, by a real
+test today: bearer-token 401 on every `/api/` op, 415 on non-JSON Content-Type, snapshot-hash 409
+on drift, HEAD-CAS abort on concurrent commit, control-character/oversize message 422, rate-limit
+429, LLM-call timeout, and `auditOk` reflecting a real write outcome. Asserted in this document but
+*not* independently enforced by a test today: hook/signing non-execution (true by construction —
+`commit-tree` structurally cannot invoke them — but no regression test proves it stays true if the
+commit path is ever refactored), and the full "if X is compromised" table above (each row's *code*
+behavior is real; the table itself is documentation, not something CI checks against drift).
+
+**Test coverage, honestly, not just "tests exist."** 35 real tests today. Covered with a real,
+adversarial test: concurrent Git process racing a commit (HEAD-drift CAS), content-addressed
+snapshot drift, a broken audit target under real HTTP load (both the pre-existing "never blocks
+the operation" invariant and the new `auditOk` surfacing), a hung LLM provider (real abort, timed),
+and the prompt-injection containment boundary. **Not tested, named directly rather than left
+implicit:** a process-kill/crash simulated at the update-ref→reset-mixed boundary specifically (the
+code path is reasoned about, above, not exercised by a real kill -9); a malicious git hook actually
+firing and mutating state (moot only because hooks don't run via this path, not exercised);
+repository-local git config changing between snapshot and commit; and a literal "browser session
+replay" test (there's no session construct to replay — the token is a flat credential, tested as
+one).
+
+**The remaining specific questions, answered directly, not folded into the table above:**
+- *Why treat the diff as untrusted only inside the LLM prompt, not throughout the whole pipeline?*
+  Because outside the prompt, the diff is never *interpreted* — it's hashed (content-addressing),
+  displayed (the dashboard), and committed as raw bytes. "Untrusted" matters specifically at the one
+  point something *reads it as language*. If a future version adds anything else that interprets
+  diff content as instructions, that new surface needs the same fencing — this isn't a one-time fix.
+- *What stops a future agentic tool on the LLM path from turning today's prompt-injection issue into
+  tool-execution?* Nothing architectural — today there is no tool-calling on this path at all, only
+  text generation, so the blast radius is capped at the commit message string by the absence of
+  tools, not by a designed capability boundary. Adding a tool call here would need its own real
+  authorization step before this tool's threat model still holds; it would not inherit safety from
+  the diff fence.
+- *Why is an external LLM part of a local-first Git workflow at all?* It's opt-in, not structural —
+  reading the diff and committing work fully without ever calling one; only the Generate button
+  uses it. The trade is real (an external network dependency, using your own key) for a real
+  benefit (a fast, drafted message from actual content); the honest answer to "why include it" is
+  that a git tool with zero AI assistance was a *different*, less useful tool, and this one chose to
+  offer it as strictly additive rather than mandatory.
+- *What happens to sensitive content sent to the LLM provider — retention, logging?* That's the
+  provider's own data policy, not this tool's to promise — it's your own API key, so your existing
+  agreement with Anthropic/OpenAI governs it, the same as any other tool you point at that key.
+- *Concurrent slow LLM calls, and an authenticated caller intentionally exhausting the process via
+  expensive diffs?* Rate limits bound how many *new* requests start, not the resource cost of ones
+  already in flight (stated above) — an authenticated local caller deliberately doing this is
+  already inside the trust boundary (see the table above: "another local process, same OS user" is
+  the one thing this tier doesn't defend against), so this is a real, named non-goal, not a missed
+  case.
+
+**Is this a real security architecture, or safeguards around a single-user localhost trust model?**
+The honest answer is the second one, and that's a legitimate, named design tier for what this tool
+actually is — not a hedge. Every real defense above (bearer auth, snapshot-binding, CAS, the
+prompt-injection fence, the LLM timeout) earns its keep against a browser-origin attacker or a
+different OS user; none of them, individually or together, defend against another process running
+as *you*. That's not a gap being talked around — it's the one invariant that has to be said in one
+sentence, directly: **this tool's security model ends at your own OS user account, and begins
+again only if you need something that account-level trust doesn't already give you for free.**
+
 ## What it never does
 
 - Never sends your diff anywhere except the LLM API you've configured, with your own key.

@@ -7,6 +7,30 @@
 
 import { randomUUID } from "node:crypto";
 
+// An external LLM call with no timeout hangs the request indefinitely if the provider never
+// responds — a real, previously-unbounded resource-exhaustion vector (a hung outstanding request
+// holds the per-repo commit lock's caller waiting forever, and rate limiting only bounds how many
+// NEW requests start, not how long an in-flight one can run). Real, not decorative: aborts the
+// actual fetch via AbortController, so the socket is really torn down, not just the caller's await.
+//
+// Read per-call, like every other DAN_OSS_COMMIT_* env var in this file (e.g. DAN_OSS_COMMIT_MODEL
+// above) — never cached at module-load time, so a caller (or a test) can actually configure it.
+async function fetchWithTimeout(url, options) {
+  const timeoutMs = Number(process.env.DAN_OSS_COMMIT_LLM_TIMEOUT_MS) || 60_000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (err) {
+    if (err.name === "AbortError") {
+      throw new Error(`LLM request timed out after ${timeoutMs}ms (DAN_OSS_COMMIT_LLM_TIMEOUT_MS)`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 const SYSTEM_PROMPT = `You write git commit messages from a real diff. Rules:
 - First line: a real, specific summary in the imperative mood ("Fix", "Add", "Remove"), under 72 chars.
 - Blank line, then body only if the diff needs more than the summary to explain WHY, not WHAT (the diff already shows what changed).
@@ -28,7 +52,7 @@ function fencedDiff(diff) {
 }
 
 async function callAnthropic(apiKey, diff) {
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
+  const res = await fetchWithTimeout("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -50,7 +74,7 @@ async function callAnthropic(apiKey, diff) {
 }
 
 async function callOpenAI(apiKey, diff) {
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+  const res = await fetchWithTimeout("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
       "content-type": "application/json",
