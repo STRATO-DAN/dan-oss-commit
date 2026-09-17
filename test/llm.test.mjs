@@ -2,7 +2,7 @@
 // call to Anthropic/OpenAI (no test here should need, or spend, a real API key).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { configuredProvider, generateCommitMessage } from "../src/llm.js";
+import { configuredProvider, generateCommitMessage, looksLikeSecret } from "../src/llm.js";
 
 function withEnv(vars, fn) {
   const prev = {};
@@ -116,6 +116,31 @@ test("prompt-injection boundary: the untrusted diff is fenced + labeled, the sys
       },
     );
   }));
+
+// ── C4: an advisory (non-blocking) warning when the diff looks like it carries a secret ────────────
+test("C4: looksLikeSecret flags credential-shaped content and leaves ordinary diffs alone", () => {
+  // Assembled from fragments so this test file itself carries no literal a secret scanner would trip on.
+  const awsKey = "AKIA" + "ABCDEFGH" + "IJKLMNOP";
+  const openaiKey = "sk-" + "aBcD1234".repeat(3);
+  assert.equal(looksLikeSecret(`+aws_key = ${awsKey}`), true);
+  assert.equal(looksLikeSecret(`+client = new Client("${openaiKey}")`), true);
+  assert.equal(looksLikeSecret("+const total = subtotal + tax;"), false);
+});
+
+test("C4: generateCommitMessage returns secretWarning:true for a secret-shaped diff, but never blocks generation", () =>
+  withEnv({ ANTHROPIC_API_KEY: "sk-ant-fake" }, () =>
+    withFetch(
+      async () => ({ ok: true, status: 200, json: async () => ({ content: [{ text: "Add config" }] }) }),
+      async () => {
+        const awsKey = "AKIA" + "ABCDEFGH" + "IJKLMNOP";
+        const flagged = await generateCommitMessage(`diff --git a/config b/config\n+aws_key = ${awsKey}\n`);
+        assert.equal(flagged.secretWarning, true, "a credential-shaped diff is flagged");
+        assert.equal(flagged.message, "Add config", "generation is advisory-only — never blocked or redacted");
+
+        const clean = await generateCommitMessage("diff --git a/x b/x\n+const n = 1;\n");
+        assert.equal(clean.secretWarning, false, "an ordinary diff is not flagged");
+      },
+    )));
 
 // ── a hung provider must not hang the caller forever ────────────────────────────────────────────
 test("a provider that never responds is aborted after the configured timeout, not left hanging forever", () =>
