@@ -339,7 +339,16 @@ export function createServer({ cwd = process.cwd(), token = makeToken() } = {}) 
 
 export function listen(port, cwd) {
   const server = createServer({ cwd });
-  return new Promise((resolve) => {
-    server.listen(port, "127.0.0.1", () => resolve(server));
+  return new Promise((resolve, reject) => {
+    // Surface a bind failure (EADDRINUSE, EACCES, …) as a rejected promise so the launcher can exit
+    // with a clean one-line message instead of the 'error' event crashing as an uncaught exception.
+    // The listener is one-shot and removed on success, so a later runtime error still reaches whatever
+    // 'error' handler the caller attaches to the returned server.
+    const onError = (err) => reject(err);
+    server.once("error", onError);
+    server.listen(port, "127.0.0.1", () => {
+      server.removeListener("error", onError);
+      resolve(server);
+    });
   });
 }
