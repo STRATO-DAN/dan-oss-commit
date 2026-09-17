@@ -246,6 +246,18 @@ export function createServer({ cwd = process.cwd(), token = makeToken() } = {}) 
           // visible only in this process's own stderr.
           return sendJson(res, 200, { ok: true, ...result, message, auditOk });
         } catch (err) {
+          // 🔒 Secret gate — a detected credential is a deliberate, client-actionable block (deny by
+          // default), NOT an upstream failure: 422, and no LLM call was made. The reason and audit line
+          // name only the matched pattern TYPES (err.patterns), never the secret value.
+          if (err.secretBlocked) {
+            audit({ action: "generate-blocked", reason: "secret-detected", patterns: err.patterns });
+            return sendJson(res, 422, {
+              ok: false,
+              secretBlocked: true,
+              patterns: err.patterns,
+              reason: err.message,
+            });
+          }
           // A provider/LLM-boundary failure is an upstream error, not a client success — 502, never a false 2xx.
           // Audited too: the audit trail must record what actually happened, not just successes.
           audit({ action: "generate-failed", reason: err.message });
