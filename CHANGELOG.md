@@ -3,6 +3,27 @@
 All notable changes to `@strato-dan/commit` are documented here.
 This project uses [semantic versioning](https://semver.org/).
 
+## [0.7.0] — 2026-09-19
+
+### Security
+
+- **Untracked files now included in the review list.** `stageAll:true` commits the working tree
+  (including untracked content), but the shown file list previously only came from
+  `git diff --name-status`, which never lists untracked files — a reviewer could approve a tree
+  they hadn't actually seen in full.
+- **Filter-override cache now has a 5s TTL** instead of caching forever, so a filter added to
+  `.git/config` after the first read no longer stays unmitigated for the rest of the process's life.
+- **Secret detector** now also catches unquoted key=value assignments, connection-string
+  credentials (postgres/mysql/mongodb/redis/amqp), AWS secret keys, and Anthropic/OpenAI-style API
+  key prefixes.
+- **Concurrent LLM generations are now capped** (`DAN_OSS_COMMIT_MAX_INFLIGHT_GENERATE`, default 2)
+  — the write-rate limiter bounded request rate, not concurrent resource consumption.
+- **Audit records now carry real forensic context** (repo, branch, tree sha, snapshot, head, file
+  count) instead of just an action name.
+- **Bearer token held in-memory only** (was also written to sessionStorage).
+- **Displayed repo name** now strips both POSIX and Windows path separators, so a Windows absolute
+  path can no longer leak into the UI.
+
 ## [0.6.0] — 2026-09-17
 
 A purely **additive** polish release — no change to any existing command, route, or response. Launcher
