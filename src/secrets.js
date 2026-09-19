@@ -37,7 +37,7 @@ const PATTERNS = [
   // segment class, so the quantifiers are unambiguous (linear, no backtracking blow-up).
   { name: "jwt", re: new RegExp(F("eyJ", "[A-Za-z0-9_-]{10,}", "\\.", "[A-Za-z0-9_-]{10,}", "\\.", "[A-Za-z0-9_-]{10,}")) },
   // Generic quoted assignment: a credential-ish key set to a quoted value of 8+ chars. The value
-  // class `[^"']` is disjoint from the closing quote, so this is linear too.
+  // class `[^"'`]` is disjoint from the closing quote, so this is linear too.
   {
     name: "generic-secret-assignment",
     re: new RegExp(
@@ -45,6 +45,25 @@ const PATTERNS = [
       "i",
     ),
   },
+  // FINDING 04 fix: unquoted key=value credentials (`api_key=abc123...`, `secret: xyz...`).
+  // Value class excludes whitespace/comment terminators; linear (no nesting).
+  {
+    name: "unquoted-secret-assignment",
+    re: new RegExp(
+      F("(password|passwd|secret|token|api[_-]?key)", "\\s*[:=]\\s*", "[A-Za-z0-9_.\\-/+]{12,}"),
+      "i",
+    ),
+  },
+  // FINDING 04 fix: connection-string forms (`postgres://user:pass@host`,
+  // `mongodb+srv://...`, `mysql://...`, `redis://:pass@...`). Linear prefix + bounded class.
+  {
+    name: "connection-string-credential",
+    re: new RegExp(F("(postgres|postgresql|mysql|mongodb(\\+srv)?|redis|amqp)(s)?://", "[^\\s\"']{8,}"), "i"),
+  },
+  // FINDING 04 fix: additional provider prefixes missed by the base set.
+  { name: "aws-secret-key", re: new RegExp(F("aws_secret", "[A-Za-z0-9/+=]{30,}"), "i") },
+  { name: "anthropic-api-key", re: new RegExp(F("sk-ant-", "[A-Za-z0-9_-]{20,}")) },
+  { name: "openai-project-key", re: new RegExp(F("sk-proj-", "[A-Za-z0-9_-]{20,}")) },
 ];
 
 /**
