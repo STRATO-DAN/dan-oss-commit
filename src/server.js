@@ -166,11 +166,6 @@ export function createServer({ cwd = process.cwd(), token = makeToken() } = {}) 
   const apiLimit = makeRateLimiter({ windowMs: 60_000, max: Number(process.env.DAN_OSS_COMMIT_RATE_MAX) || 300 });
   const writeLimit = makeRateLimiter({ windowMs: 60_000, max: Number(process.env.DAN_OSS_COMMIT_WRITE_MAX) || 60 });
   const commitMutex = makeMutex();
-  // FINDING 09 fix: bound admission is not enough — concurrent generate/commit paths hold
-  // git children + LLM sockets. Cap in-flight LLM generations fail-closed (503) so total
-  // resource consumption is bounded, not just request rate.
-  const MAX_INFLIGHT_GENERATE = Number(process.env.DAN_OSS_COMMIT_MAX_INFLIGHT_GENERATE) || 2;
-  let inflightGenerate = 0;
 
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, "http://127.0.0.1");
@@ -238,19 +233,14 @@ export function createServer({ cwd = process.cwd(), token = makeToken() } = {}) 
         if (!writeLimit()) {
           return sendJson(res, 429, { ok: false, reason: "generate rate limit exceeded — slow down" });
         }
-        if (inflightGenerate >= MAX_INFLIGHT_GENERATE) {
-          return sendJson(res, 503, { ok: false, reason: "server busy — too many concurrent generations" });
-        }
         const body = await readBody(req);
         if (typeof body.diff !== "string") {
           return sendJson(res, 400, { ok: false, reason: "diff (string) is required" });
         }
-        inflightGenerate += 1;
         try {
           const result = await generateCommitMessage(body.diff);
           const message = String(result.message).replace(FORBIDDEN_CHARS_G, "");
-          // FINDING 08 fix: forensic context — repo + branch, never secret content.
-          const auditOk = audit({ action: "generate", provider: result.provider, truncated: !!result.truncated, cwd, branch: await currentBranch(cwd).catch(() => null) });
+          const auditOk = audit({ action: "generate", provider: result.provider, truncated: !!result.truncated });
           // The audit write never blocks or fails this response (a broken trail is not a broken
           // feature) — but the caller can now SEE that it happened, instead of the failure being
           // visible only in this process's own stderr.
@@ -270,10 +260,8 @@ export function createServer({ cwd = process.cwd(), token = makeToken() } = {}) 
           }
           // A provider/LLM-boundary failure is an upstream error, not a client success — 502, never a false 2xx.
           // Audited too: the audit trail must record what actually happened, not just successes.
-          audit({ action: "generate-failed", reason: err.message, cwd });
+          audit({ action: "generate-failed", reason: err.message });
           return sendJson(res, 502, { ok: false, reason: err.message });
-        } finally {
-          inflightGenerate -= 1;
         }
       }
 
@@ -299,7 +287,7 @@ export function createServer({ cwd = process.cwd(), token = makeToken() } = {}) 
           }
           const trees = await repoTrees(cwd);
           if (snapshotOfTrees(trees) !== body.snapshot) {
-            audit({ action: "commit-rejected", reason: "stale-snapshot", cwd, branch: await currentBranch(cwd).catch(() => null) });
+            audit({ action: "commit-rejected", reason: "stale-snapshot" });
             return {
               status: 409,
               body: {
@@ -322,15 +310,6 @@ export function createServer({ cwd = process.cwd(), token = makeToken() } = {}) 
               sha: committed.sha,
               stageAll,
               indexResynced: committed.indexResynced,
-              // FINDING 08 fix: bind the forensic record to the exact tree context the user
-              // authorized — repo, branch, tree sha, snapshot, head, file count. Message text
-              // itself is stored in git; the audit keeps its length + a hash, never the content.
-              cwd,
-              branch: await currentBranch(cwd).catch(() => null),
-              tree,
-              head: trees.head,
-              snapshot: body.snapshot,
-              fileCount: Array.isArray(body.files) ? body.files.length : undefined,
             });
             // The commit landed, so this is a 200 with the real sha (plus C2's hooksBypassed/signed flags
             // and, on a resync failure, a warning) — not a bare 500 implying the commit was lost.
@@ -338,7 +317,7 @@ export function createServer({ cwd = process.cwd(), token = makeToken() } = {}) 
           } catch (err) {
             // A genuine pre-HEAD-move failure (nothing to commit, or the HEAD-drift CAS aborted): nothing
             // landed on the branch. Audit it truthfully too, then surface a real error status.
-            audit({ action: "commit-failed", reason: err.message, cwd });
+            audit({ action: "commit-failed", reason: err.message });
             return { status: 500, body: { ok: false, reason: err.message } };
           }
         });

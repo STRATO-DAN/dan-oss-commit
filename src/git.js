@@ -24,18 +24,15 @@ const run = promisify(execFile);
 // neutralize every configured filter to empty; content diffs additionally pass --no-ext-diff/--no-textconv.
 // This keeps the tool's own git invocations honest regardless of what the cloned repo tries to smuggle in.
 
-const _filterOverridesCache = new Map(); // resolved cwd -> { flags, at }
-const FILTER_CACHE_TTL_MS = 5000;
+const _filterOverridesByCwd = new Map(); // resolved cwd -> ["-c","filter.x.clean=", ...]
 
 /** Enumerate every configured git filter (repo-local + global) and build `-c filter.<name>.<op>=`
  *  overrides that disable each clean/smudge/process command. A pure `git config` read triggers no
- *  filter and no fsmonitor, so this is itself safe to run against a hostile repo.
- *  FINDING 10 fix: never trust a stale memo — TTL 5s, then re-enumerate, so a config change at T1
- *  cannot outlive its mitigation at T2. */
+ *  filter and no fsmonitor, so this is itself safe to run against a hostile repo. Memoized per cwd. */
 async function filterOverrides(cwd) {
   const key = path.resolve(cwd);
-  const cached = _filterOverridesCache.get(key);
-  if (cached && (Date.now() - cached.at) < FILTER_CACHE_TTL_MS) return cached.flags;
+  const cached = _filterOverridesByCwd.get(key);
+  if (cached) return cached;
   let flags = [];
   try {
     const { stdout } = await run(
@@ -51,7 +48,7 @@ async function filterOverrides(cwd) {
   } catch {
     flags = []; // not a repo, or no filters configured — nothing to neutralize
   }
-  _filterOverridesCache.set(key, { flags, at: Date.now() });
+  _filterOverridesByCwd.set(key, flags);
   return flags;
 }
 
@@ -102,29 +99,13 @@ export async function changedFiles(cwd, source) {
     ? ["diff", "--no-ext-diff", "--no-textconv", "--staged", "--name-status"]
     : ["diff", "--no-ext-diff", "--no-textconv", "--name-status"];
   const out = await git(cwd, args);
-  const files = out
+  return out
     .split("\n")
     .filter(Boolean)
     .map((line) => {
       const [status, ...rest] = line.split("\t");
       return { status, path: rest.join("\t") };
     });
-  // FINDING 01 fix: `diff --name-status` excludes untracked files, but `stageAll:true`
-  // commits workTree (index after `add -A`, i.e. INCLUDING untracked content). The review
-  // file list must therefore name untracked files explicitly, or the user authorizes a tree
-  // they never saw. `ls-files --others` is a pure listing — no filter/smudge execution —
-  // and runs under the same hardening wrapper.
-  if (source !== "staged") {
-    try {
-      const untracked = (await git(cwd, ["ls-files", "--others", "--exclude-standard"])).trim();
-      if (untracked) {
-        for (const p of untracked.split("\n").filter(Boolean)) {
-          if (!files.some((f) => f.path === p)) files.push({ status: "?", path: p });
-        }
-      }
-    } catch { /* non-fatal: snapshot tree hash remains the binding authority */ }
-  }
-  return files;
 }
 
 /** `symbolic-ref`, not `rev-parse --abbrev-ref HEAD` — the latter needs HEAD to resolve to a
@@ -232,16 +213,7 @@ export async function commitTree(cwd, tree, head, message) {
   // sha256=64) from newSha's own length so it works on either.
   const expectedOld = head || "0".repeat(newSha.length);
   try {
-    if (!head) {
-      const branch = await currentBranch(cwd);
-      if (branch) {
-        await git(cwd, ["update-ref", "-m", "dan-oss-commit: commit reviewed tree", `refs/heads/${branch}`, newSha, expectedOld]);
-      } else {
-        await git(cwd, ["update-ref", "-m", "dan-oss-commit: commit reviewed tree", "HEAD", newSha, expectedOld]);
-      }
-    } else {
-      await git(cwd, ["update-ref", "-m", "dan-oss-commit: commit reviewed tree", "HEAD", newSha, expectedOld]);
-    }
+    await git(cwd, ["update-ref", "-m", "dan-oss-commit: commit reviewed tree", "HEAD", newSha, expectedOld]);
   } catch (err) {
     // update-ref IS the compare-and-swap. If it fails, HEAD never moved and nothing landed on the
     // branch (the commit-tree object is simply unreachable) — safe to abort with a real error.
