@@ -7,17 +7,20 @@ let currentSnapshot = null; // v0.2 — the reviewed repo snapshot; sent with co
 
 // v0.2 — the API requires the instance bearer token. It arrives in the launch URL (?token=…); capture it
 // once, strip it from the visible URL, and attach it to every API call.
+// FINDING 06 fix: in-memory ONLY, matching the documented lifecycle. Never sessionStorage/localStorage:
+// a reviewer reasoning about "memory-only" must get memory-only at runtime.
+let _commitToken = "";
 const COMMIT_TOKEN = (() => {
   try {
     const u = new URL(location.href);
     const fromUrl = u.searchParams.get("token");
     if (fromUrl) {
-      try { sessionStorage.setItem("commitToken", fromUrl); } catch {}
+      _commitToken = fromUrl;
       u.searchParams.delete("token");
       history.replaceState(null, "", u.pathname + u.search + u.hash);
-      return fromUrl;
+      return _commitToken;
     }
-    return sessionStorage.getItem("commitToken") || "";
+    return _commitToken;
   } catch {
     return "";
   }
@@ -67,7 +70,9 @@ async function loadStatus() {
   // Real local absolute path (carries the OS username on most machines) never rendered — the
   // repo's own folder name is enough context, matching this product's own "privacy is the
   // architecture" line rather than leaking a filesystem detail nobody asked to see.
-  const rawRepoName = data.cwd.split("/").filter(Boolean).pop() || "this repo";
+  // FINDING 11 fix: split on both POSIX and Windows separators, so `C:\Users\name\repo`
+  // yields `repo`, never the full `C:\Users\name\...` topology.
+  const rawRepoName = data.cwd.split(/[/\\]+/).filter(Boolean).pop() || "this repo";
   // Real trademark rule, not cosmetic: "DAN" never appears bare, always bracketed (TRADEMARK.md).
   // A folder literally named "DAN-something" would otherwise print the one bare "DAN" on the
   // whole page — render it as the real product-name form instead of the raw folder slug.
