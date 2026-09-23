@@ -279,3 +279,45 @@ test("repoSnapshot also binds new untracked file content", async () => {
     await fs.rm(repo, { recursive: true, force: true });
   }
 });
+
+// REAL FIX (external review, 2026-09-23, self-correction same day): `repoTrees()`'s workTree
+// candidate used to be computed by running `git add -A` against a temp GIT_INDEX_FILE copy — but
+// that specific combination (add + a temp index) was found to defeat this tool's own
+// core.hooksPath neutralization (a genuine, empirically-reproduced git behavior: under
+// GIT_INDEX_FILE, post-index-change ignores every config-override mechanism and still runs the
+// real .git/hooks/post-index-change script). Rewritten to build the tree via pure object-database
+// plumbing (hash-object/ls-tree/mktree) that never opens any index file at all — see the HOOKS
+// test in security.test.mjs for proof that no longer fires the hook. This test proves the OTHER
+// half: the rewrite must still produce the exact SAME tree a real `git add -A` would, including
+// nested directories, a modified tracked file, a deleted tracked file, and a brand-new untracked
+// file inside a brand-new nested directory — not just "doesn't crash".
+test("SECURITY: repoTrees' workTree matches a real `git add -A`, byte-for-byte, including nested dirs/deletes/new-dirs", async () => {
+  const repo = await makeRepo();
+  const idxDir = await fs.mkdtemp(path.join(os.tmpdir(), "dan-oss-commit-parity-idx-"));
+  try {
+    await fs.mkdir(path.join(repo, "sub", "deep"), { recursive: true });
+    await fs.writeFile(path.join(repo, "a.txt"), "hello\n");
+    await fs.writeFile(path.join(repo, "sub", "b.txt"), "b\n");
+    await fs.writeFile(path.join(repo, "sub", "deep", "c.txt"), "c\n");
+    await run("git", ["add", "-A"], { cwd: repo });
+    await run("git", ["commit", "-q", "-m", "init"], { cwd: repo });
+
+    // A modified tracked file, a deleted tracked file, and a new untracked file inside a NEW
+    // nested directory — the exact shape a real `git add -A` has to get right.
+    await fs.writeFile(path.join(repo, "a.txt"), "hello\nmodified\n");
+    await fs.rm(path.join(repo, "sub", "b.txt"));
+    await fs.mkdir(path.join(repo, "sub", "new"), { recursive: true });
+    await fs.writeFile(path.join(repo, "sub", "new", "d.txt"), "new nested untracked\n");
+    await fs.writeFile(path.join(repo, "e.txt"), "new top-level untracked\n");
+
+    const trees = await repoTrees(repo);
+
+    const tmpIndex = path.join(idxDir, "index");
+    await run("git", ["add", "-A"], { cwd: repo, env: { ...process.env, GIT_INDEX_FILE: tmpIndex } });
+    const { stdout } = await run("git", ["write-tree"], { cwd: repo, env: { ...process.env, GIT_INDEX_FILE: tmpIndex } });
+    assert.equal(trees.workTree, stdout.trim(), "the plumbing-built workTree must be byte-identical to a real `git add -A`");
+  } finally {
+    await fs.rm(repo, { recursive: true, force: true });
+    await fs.rm(idxDir, { recursive: true, force: true });
+  }
+});

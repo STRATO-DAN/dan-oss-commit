@@ -40,7 +40,7 @@ async function filterOverrides(cwd) {
   try {
     const { stdout } = await run(
       "git",
-      ["-c", "core.fsmonitor=", "-c", `core.hooksPath=${NO_HOOKS_PATH}`, "config", "--name-only", "--get-regexp", "^filter\\."],
+      ["-c", "core.fsmonitor=", "-c", `core.hooksPath=${await emptyHooksDir()}`, "config", "--name-only", "--get-regexp", "^filter\\."],
       { cwd, maxBuffer: 1024 * 1024, env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1" } },
     );
     flags = stdout
@@ -60,14 +60,32 @@ async function filterOverrides(cwd) {
 // every index read (including /api/diff, which merely SHOWS a diff), and reference-transaction
 // fires on commit. Both are real, arbitrary-code-execution paths from a hostile repo the README
 // promises can't happen. Fixed the same way as fsmonitor/filters: a `-c` override on every call.
-// Empirically confirmed (not assumed): pointing core.hooksPath at a path that does not exist
-// causes git to silently find no hook scripts there and proceed normally -- no error, no crash,
-// exactly the same "safe no-op" shape as `core.fsmonitor=` already relies on.
-const NO_HOOKS_PATH = "/dev/null/dan-oss-commit-hooks-disabled";
+//
+// SELF-CORRECTION (2026-09-23, same day): the first fix here pointed core.hooksPath at a
+// NONEXISTENT path (a "safe no-op" that matches how `core.fsmonitor=` behaves). That works for
+// an ordinary git invocation, but this module ALSO uses the GIT_INDEX_FILE technique below
+// (treeViaTempIndex, for the workTree candidate) to stage into a private, throwaway index copy
+// without ever touching the repo's real index. Empirically confirmed, reproduced across 8+ clean
+// runs, independent of override mechanism (-c, GIT_CONFIG_COUNT/KEY/VALUE env vars, and even a
+// real on-disk .git/config write all fail the same way): under GIT_INDEX_FILE specifically, git's
+// post-index-change hook lookup ignores a nonexistent-path or /dev/null hooksPath value entirely
+// and still runs the real .git/hooks/post-index-change script -- a genuine git behavior, not a
+// bug in this code. What DOES reliably suppress it, even under GIT_INDEX_FILE: pointing
+// core.hooksPath at a real, EXISTING, EMPTY directory. Switched to that -- one such directory,
+// created once (idempotent, `recursive: true`) and reused for the life of the process, since it
+// never needs to contain anything.
+let _hooksDirPromise = null;
+function emptyHooksDir() {
+  if (!_hooksDirPromise) {
+    const dir = path.join(os.tmpdir(), "dan-oss-commit-no-hooks");
+    _hooksDirPromise = fsp.mkdir(dir, { recursive: true }).then(() => dir);
+  }
+  return _hooksDirPromise;
+}
 
 async function git(cwd, args, extraEnv) {
   // Static + per-repo hardening prepended to EVERY git call this module makes.
-  const hardening = ["-c", "core.fsmonitor=", "-c", `core.hooksPath=${NO_HOOKS_PATH}`, ...(await filterOverrides(cwd))];
+  const hardening = ["-c", "core.fsmonitor=", "-c", `core.hooksPath=${await emptyHooksDir()}`, ...(await filterOverrides(cwd))];
   try {
     const { stdout } = await run("git", [...hardening, ...args], {
       cwd,
@@ -105,7 +123,7 @@ export async function isRepo(cwd) {
 async function untrackedDiff(cwd) {
   const untracked = (await git(cwd, ["ls-files", "--others", "--exclude-standard"])).trim();
   if (!untracked) return "";
-  const hardening = ["-c", "core.fsmonitor=", "-c", `core.hooksPath=${NO_HOOKS_PATH}`, ...(await filterOverrides(cwd))];
+  const hardening = ["-c", "core.fsmonitor=", "-c", `core.hooksPath=${await emptyHooksDir()}`, ...(await filterOverrides(cwd))];
   const parts = [];
   for (const p of untracked.split("\n").filter(Boolean)) {
     try {
@@ -220,21 +238,129 @@ export async function hasCommits(cwd) {
 // committed while the snapshot check still passed.) Instead we hash the actual git TREE objects that
 // would be committed, computed against a TEMPORARY index so the real index is never touched.
 
-/** Write the tree of a temp copy of the real index — optionally after `git add -A` into that copy
- *  (so it reflects everything a real `add -A` would stage, including untracked file CONTENT). Returns
+/** Write the tree of a temp copy of the real index — untouched, no `add` run against it. Returns
  *  the tree SHA, or null in a state git can't write a tree for (e.g. an unresolved merge conflict). */
-async function treeViaTempIndex(cwd, realIndexPath, addAll) {
+async function treeViaTempIndex(cwd, realIndexPath) {
   const tmp = path.join(os.tmpdir(), `dan-oss-commit-idx-${crypto.randomBytes(8).toString("hex")}`);
   try {
     try { await fsp.copyFile(realIndexPath, tmp); } catch { /* no index yet (fresh repo) → start empty */ }
-    const env = { GIT_INDEX_FILE: tmp };
-    if (addAll) await git(cwd, ["add", "-A"], env);
-    return (await git(cwd, ["write-tree"], env)).trim();
+    return (await git(cwd, ["write-tree"], { GIT_INDEX_FILE: tmp })).trim();
   } catch {
     return null; // e.g. unmerged index — deterministic null; the porcelain component keeps the snapshot stable
   } finally {
     await fsp.rm(tmp, { force: true });
   }
+}
+
+// SELF-CORRECTION (2026-09-23, same day as the hooksPath fix above): the workTree candidate used
+// to be computed by running `git add -A` against the temp GIT_INDEX_FILE copy (see the removed
+// `addAll` branch above). That is EXACTLY the operation the hooksPath comment above describes as
+// unfixable from this side -- under GIT_INDEX_FILE, git's post-index-change hook fires regardless
+// of any config override, a real, empirically-reproduced git behavior, not something this tool can
+// neutralize via `-c`/env/on-disk config. Real fix: never run `add` (or any other index-writing
+// command) against a temp index at all. Build the workTree tree object directly via pure
+// object-database plumbing -- `hash-object`, `ls-tree`, `mktree` -- none of which ever open an
+// index file, so there is no index-change event for the hook to observe. Confirmed with a real
+// adversarial hook script: this path does not fire it (see test/security.test.mjs's HOOKS test).
+
+/** A git call that writes to stdin (only `mktree` needs this) — the shared `git()` helper above
+ *  has no stdin support since nothing else in this module needed it before now. */
+async function gitWithStdin(cwd, args, input) {
+  const hardening = ["-c", "core.fsmonitor=", "-c", `core.hooksPath=${await emptyHooksDir()}`, ...(await filterOverrides(cwd))];
+  return new Promise((resolve, reject) => {
+    const child = execFile("git", [...hardening, ...args], { cwd, maxBuffer: 1024 * 1024 * 32 }, (err, stdout, stderr) => {
+      if (err) {
+        const detail = stderr?.trim() || err.message;
+        reject(new Error(`git ${args.join(" ")} failed: ${detail}`));
+      } else {
+        resolve(stdout);
+      }
+    });
+    child.stdin.end(input);
+  });
+}
+
+const EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"; // git's well-known empty-tree object id
+
+/** Turn a flat map of path -> {mode, sha} into a real nested tree object, building bottom-up
+ *  (deepest directories first) via `mktree`, which only ever accepts one directory's direct
+ *  children per call — never touches an index, never runs `add`. */
+async function writeTreeFromEntries(cwd, entries) {
+  const root = { dirs: new Map(), files: new Map() };
+  for (const [p, entry] of entries) {
+    const parts = p.split("/");
+    let node = root;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const part = parts[i];
+      if (!node.dirs.has(part)) node.dirs.set(part, { dirs: new Map(), files: new Map() });
+      node = node.dirs.get(part);
+    }
+    node.files.set(parts[parts.length - 1], entry);
+  }
+  async function writeNode(node) {
+    const lines = [];
+    for (const [name, entry] of node.files) lines.push(`${entry.mode} blob ${entry.sha}\t${name}`);
+    for (const [name, child] of node.dirs) lines.push(`040000 tree ${await writeNode(child)}\t${name}`);
+    if (lines.length === 0) return EMPTY_TREE_SHA;
+    return (await gitWithStdin(cwd, ["mktree"], lines.join("\n") + "\n")).trim();
+  }
+  return writeNode(root);
+}
+
+/** The tree `git add -A` would produce (staged content + every unstaged modification + every
+ *  untracked file, respecting excludes) — computed WITHOUT ever running `add`, so it never opens a
+ *  temp index and never risks the post-index-change hook (see the note above `gitWithStdin`).
+ *  `stagedTree` is the real, already-computed base (whatever is currently staged); every changed
+ *  path from real `changedFiles()` (tracked M/D plus untracked "?", the SAME source of truth the
+ *  reviewed diff and file list already use) is re-hashed straight from the real working-tree file
+ *  and layered on top. */
+async function buildWorkTree(cwd, stagedTree) {
+  const changed = await changedFiles(cwd, "unstaged");
+  if (changed.length === 0) return stagedTree; // nothing unstaged/untracked — identical to staged
+
+  const entries = new Map();
+  if (stagedTree) {
+    const out = await git(cwd, ["ls-tree", "-r", "--full-tree", stagedTree]);
+    for (const line of out.split("\n").filter(Boolean)) {
+      const [info, filePath] = line.split("\t");
+      const [mode, , sha] = info.split(" ");
+      entries.set(filePath, { mode, sha });
+    }
+  }
+
+  for (const { status, path: p } of changed) {
+    if (status === "D") {
+      entries.delete(p);
+      continue;
+    }
+    const abs = path.join(cwd, p);
+    let stat;
+    try {
+      stat = await fsp.lstat(abs);
+    } catch {
+      entries.delete(p); // vanished between the status read and here — treat as deleted
+      continue;
+    }
+    if (stat.isSymbolicLink()) {
+      // hash-object needs real file content, not a live symlink — write the link's target string
+      // to a throwaway file and hash THAT, which is exactly what a symlink blob's content is.
+      const target = await fsp.readlink(abs);
+      const tmpLink = path.join(os.tmpdir(), `dan-oss-commit-symlink-${crypto.randomBytes(6).toString("hex")}`);
+      try {
+        await fsp.writeFile(tmpLink, target);
+        const sha = (await git(cwd, ["hash-object", "-w", "--", tmpLink])).trim();
+        entries.set(p, { mode: "120000", sha });
+      } finally {
+        await fsp.rm(tmpLink, { force: true });
+      }
+    } else {
+      const sha = (await git(cwd, ["hash-object", "-w", "--", abs])).trim();
+      const mode = stat.mode & 0o111 ? "100755" : "100644";
+      entries.set(p, { mode, sha });
+    }
+  }
+
+  return writeTreeFromEntries(cwd, entries);
 }
 
 /** The two candidate trees a commit could produce, plus HEAD and porcelain status:
@@ -247,8 +373,8 @@ export async function repoTrees(cwd) {
   let head = null;
   try { head = (await git(cwd, ["rev-parse", "HEAD"])).trim(); } catch { /* unborn HEAD */ }
   const realIndexPath = path.resolve(cwd, (await git(cwd, ["rev-parse", "--git-path", "index"])).trim());
-  const stagedTree = await treeViaTempIndex(cwd, realIndexPath, false);
-  const workTree = await treeViaTempIndex(cwd, realIndexPath, true);
+  const stagedTree = await treeViaTempIndex(cwd, realIndexPath);
+  const workTree = stagedTree === null ? null : await buildWorkTree(cwd, stagedTree).catch(() => null);
   const status = await git(cwd, ["status", "--porcelain=v1", "-uall"]);
   return { head, stagedTree, workTree, status };
 }

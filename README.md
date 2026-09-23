@@ -132,15 +132,19 @@ dependencies to add:
 npm test
 ```
 
-Observed on the current tree: **48 tests, all passing** — including the security regressions that prove
+Observed on the current tree: **100 tests, all passing** — including the security regressions that prove
 the content-addressed snapshot (the reviewed bytes changing moves the snapshot even when `git status`
 does not; a commit is bound to the reviewed tree even if the working tree changes after review), that a
-hostile repo's clean-filter/fsmonitor does not execute on `/api/diff`, that the audit chain catches an
-in-place tamper, and that a durable-but-unsynced commit is still reported truthfully.
+hostile repo's clean-filter/fsmonitor/hooks do not execute on `/api/diff` or `/api/commit` (with a real,
+adversarial hook script proving it, not an assumption), that the workTree computation produces the exact
+same tree a real `git add -A` would (nested directories, deletes, new files in new directories), that the
+audit chain catches an in-place tamper (and doesn't false-alarm on two real processes writing
+concurrently), that a durable-but-unsynced commit is still reported truthfully, and that a secret sitting
+only in an untracked file is blocked at commit time, not just when you click Generate.
 
 ```
-# tests 48
-# pass 48
+# tests 100
+# pass 100
 # fail 0
 ```
 
@@ -205,13 +209,22 @@ trust decision:
   alone; this stops the app from silently handing the model attacker-controlled repository text as if it
   were a trusted instruction, it does not guarantee the model can never be steered by sufficiently
   sophisticated injected content.
-- **Untrusted-repository hardening (0.4.0)** — a repository is untrusted input, and merely reading one
-  must never become code execution. Git will run an arbitrary command straight out of a repo's own
-  `.git/config` on a plain status/diff/add: `core.fsmonitor`, a `filter.<name>.clean/smudge/process`
-  routed by an in-tree `.gitattributes`, or `diff.external`/a textconv driver. Every git invocation this
-  tool makes now pins `core.fsmonitor` to inert, neutralizes every configured filter to empty via
+- **Untrusted-repository hardening (0.4.0, extended 0.7.0)** — a repository is untrusted input, and
+  merely reading one must never become code execution. Git will run an arbitrary command straight out
+  of a repo's own `.git/config` (or its committed hooks) on a plain status/diff/add: `core.fsmonitor`,
+  a `filter.<name>.clean/smudge/process` routed by an in-tree `.gitattributes`, `diff.external`/a
+  textconv driver, or a `.git/hooks/post-index-change`/`reference-transaction` hook (fires on nearly
+  every index read, including a plain `GET /api/diff`). Every git invocation this tool makes now pins
+  `core.fsmonitor` to inert, points `core.hooksPath` at a real, empty directory this tool owns (an
+  existing empty directory is what reliably suppresses hook lookup — a *nonexistent* path was tried
+  first and found, empirically, not to be enough), neutralizes every configured filter to empty via
   command-line `-c` (which overrides the repo config), and runs content diffs with `--no-ext-diff
-  --no-textconv` — so a hostile repo can't turn a plain `GET /api/diff` into command execution.
+  --no-textconv`. The workTree computation (what `stageAll:true` would commit) is built via pure
+  object-database plumbing (`hash-object`/`ls-tree`/`mktree`) instead of running `git add`, because
+  `git add` against a private temporary index was found to bypass the `core.hooksPath` override
+  entirely for `post-index-change` — a real, reproducible git behavior, not a bug in this tool's
+  config, and not fixable by any config-override mechanism from this side. So a hostile repo can't
+  turn a plain `GET /api/diff` or a commit into command execution.
 - **Rate limit runs *before* auth (0.4.0)** — the rate check precedes the bearer check, so the
   unauthenticated 401 path (which writes an audit line) is itself throttled; an unauthenticated flood can
   no longer drive unbounded audit writes by never presenting a valid token.
@@ -269,19 +282,31 @@ scanner (`src/secrets.js`) checks it for high-confidence secret shapes. If any m
 **blocks the provider call** and returns **422** with `secretBlocked: true` and a `patterns` array naming
 the matched pattern *types* — never the secret value, which is never echoed, logged, or audited.
 
+**As of 0.7.0, the same scan also runs on `/api/commit` itself** — not just the optional Generate step.
+Untracked file content is folded into the reviewed diff (`git diff` alone never shows it), and the exact
+tree a commit request is about to write (staged only, or staged+unstaged+untracked when `stageAll` is
+set) is scanned before the commit happens. A secret you never sent through Generate — because you wrote
+your own message, or it only ever lived in a brand-new untracked file — is still caught.
+
 Detected shapes (all matched with linear, backtracking-free regexes, so a hostile diff can't stall the
 scan):
 
-- AWS access key ids (`AKIA…`)
+- AWS access key ids (`AKIA…`) and AWS secret keys (`AWS_SECRET_ACCESS_KEY=…` and equivalent forms)
 - PEM private-key blocks (`-----BEGIN … PRIVATE KEY-----`, incl. RSA/EC/OPENSSH/DSA/PGP)
-- Provider API keys (`sk-…`) and Stripe live/restricted keys (`sk_live_…`, `rk_live_…`)
+- Provider API keys (`sk-…`, incl. Anthropic `sk-ant-…` and OpenAI project `sk-proj-…`) and Stripe
+  live/restricted keys (`sk_live_…`, `rk_live_…`)
 - GitHub tokens — classic (`ghp_`/`gho_`/`ghr_`/`ghs_`/`ghu_`) and fine-grained (`github_pat_…`)
 - Google API keys (`AIza…`), Slack tokens (`xox[baprs]-…`), and JWTs (`eyJ….….…`)
-- Generic quoted assignments — `password`/`passwd`/`secret`/`token`/`api_key` set to a quoted 8+ char value
+- SendGrid API keys (`SG.…`), Hugging Face tokens (`hf_…`), Azure storage account keys (`AccountKey=…`)
+- Database connection strings with embedded credentials (`postgres://`, `mysql://`, `mongodb(+srv)://`,
+  `redis://`, `amqp://`)
+- Generic quoted or unquoted assignments — `password`/`passwd`/`secret`/`token`/`api_key` set to a
+  credential-shaped value (a literal `.` in an unquoted value is treated as ordinary code, e.g.
+  `password = user.passwordHash`, not a secret, to keep this pattern from false-alarming on property access)
 
 **Opt out per your own judgement.** Set `DAN_OSS_COMMIT_ALLOW_SECRETS=1` (or `true`/`yes`) to downgrade the
-block to the pre-0.5 advisory behavior: the diff is sent anyway and the response carries a non-blocking
-`secretWarning: true` plus `secretPatterns`.
+block to the pre-0.5 advisory behavior on both `/api/generate` and `/api/commit`: the request proceeds
+anyway (the generate response carries a non-blocking `secretWarning: true` plus `secretPatterns`).
 
 **Honest limits.** The scan is high-signal, not exhaustive — it targets common, well-shaped credentials and
 will miss a bespoke or unusually formatted secret, and it can occasionally flag a benign string that merely
