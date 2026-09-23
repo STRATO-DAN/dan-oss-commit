@@ -3,6 +3,45 @@
 All notable changes to `@strato-dan/commit` are documented here.
 This project uses [semantic versioning](https://semver.org/).
 
+## [0.8.0] — 2026-09-23
+
+### Security
+
+- **Git hooks are now genuinely neutralized on every invocation, including diff reads.** A
+  hostile repo's own `.git/hooks/post-index-change` or `reference-transaction` hook could
+  previously run arbitrary code on a plain `GET /api/diff` or on a commit. Fixed in two parts,
+  found via a self-correction after the first attempt turned out incomplete: `core.hooksPath` now
+  points at a real, existing, empty directory (a nonexistent path or `/dev/null` was tried first
+  and found not to reliably suppress hooks in every code path this tool uses); and the workTree
+  computation no longer runs `git add -A` against a temporary index at all — it's built directly
+  via pure object-database plumbing (`hash-object`/`ls-tree`/`mktree`), which never opens an
+  index file, closing the one combination where the earlier fix silently didn't apply.
+- **Untracked file content is now part of the reviewed diff and the secret scan.** `git diff`
+  alone never shows untracked files; a secret sitting only in a brand-new, never-`git add`ed file
+  was invisible both to the reviewer and to the secret scanner. `realDiff()` now synthesizes and
+  folds in a real diff for each untracked file.
+- **The secret scanner now runs on the commit path itself**, not just the optional Generate step
+  — previously, writing your own commit message (or skipping Generate entirely) meant zero secret
+  scanning happened on anything you committed. A new `diffForCommit()` scans the exact tree about
+  to be written, deny-by-default, with the same `DAN_OSS_COMMIT_ALLOW_SECRETS` override.
+- **`stageAll` bypass closed.** Verified and adversarially tested that the existing
+  content-addressed snapshot already binds both the staged and full working trees, so a raw API
+  call can't fabricate a snapshot authorizing untracked content it never reviewed.
+- **Secret patterns fixed and extended**: the AWS secret-key pattern didn't match the real
+  `AWS_SECRET_ACCESS_KEY=` shape at all; added Azure, SendGrid, and Hugging Face token patterns;
+  removed a false positive on ordinary property-access code like `password = user.passwordHash`.
+- **Rate limiting split into a pre-auth and an authenticated budget** — an unauthenticated flood
+  could previously exhaust the same budget a real, authenticated user relies on.
+- **Audit chain no longer false-alarms under real concurrent use.** `prevHash` is now re-read from
+  disk immediately before every write instead of trusted from an in-memory value seeded once at
+  process start — two genuine concurrent processes writing to the same audit log no longer trip a
+  false tamper report.
+
+100 tests (up from 81), including real adversarial tests for every item above — a repo with an
+actually-installed hostile hook script, a hostile `core.fsmonitor`/`filter.*.clean` config, an
+untracked-file secret blocked at commit time without ever calling Generate, a raw API call
+rejected for a stale snapshot, and two concurrent audit writers.
+
 ## [0.7.0] — 2026-09-19
 
 ### Security
