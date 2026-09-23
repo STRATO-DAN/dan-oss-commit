@@ -177,8 +177,9 @@ export OPENAI_API_KEY=sk-...
 | `DAN_OSS_COMMIT_AUDIT` | `~/.dan-oss-commit/audit.log` | Audit-log location (hash-chained, `0600`) |
 | `DAN_OSS_COMMIT_MAX_BODY` | `262144` (256 KiB) | Max `/api/` request-body size, in bytes |
 | `DAN_OSS_COMMIT_LLM_TIMEOUT_MS` | `60000` | Hard timeout on the external LLM call |
-| `DAN_OSS_COMMIT_RATE_MAX` | `300` | Max `/api/` requests per minute |
-| `DAN_OSS_COMMIT_WRITE_MAX` | `60` | Max generate/commit requests per minute |
+| `DAN_OSS_COMMIT_RATE_MAX` | `300` | Max authenticated `/api/` requests per minute |
+| `DAN_OSS_COMMIT_GENERATE_MAX` | `60` | Max `/api/generate` requests per minute (separate budget — iterating on a message can't rate-limit your Commit) |
+| `DAN_OSS_COMMIT_COMMIT_MAX` | `60` | Max `/api/commit` requests per minute (separate budget from Generate, see above) |
 | `DAN_OSS_COMMIT_ALLOW_SECRETS` | (unset — gate on) | Set `1`/`true`/`yes` to downgrade the deny-by-default [secret gate](#secret-gate) to a non-blocking advisory warning |
 | `DAN_OSS_COMMIT_OPEN` | (auto-open on) | Set `0`/`false`/`no`/`off` to skip auto-opening a browser |
 | `DAN_OSS_COMMIT_OPENER` | platform default | Override the browser-opener command (headless/CI) |

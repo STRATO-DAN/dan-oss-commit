@@ -53,8 +53,9 @@ Environment:
   DAN_OSS_COMMIT_AUDIT          Audit-log file (default ~/.dan-oss-commit/audit.log).
   DAN_OSS_COMMIT_MODEL          Model name passed to the provider API.
   DAN_OSS_COMMIT_MAX_BODY       Max /api/ request-body size in bytes (default 262144).
-  DAN_OSS_COMMIT_RATE_MAX       Max /api/ requests per minute (default 300).
-  DAN_OSS_COMMIT_WRITE_MAX      Max generate/commit requests per minute (default 60).
+  DAN_OSS_COMMIT_RATE_MAX       Max authenticated /api/ requests per minute (default 300).
+  DAN_OSS_COMMIT_GENERATE_MAX   Max /api/generate requests per minute (default 60, own budget).
+  DAN_OSS_COMMIT_COMMIT_MAX     Max /api/commit requests per minute (default 60, own budget).
   DAN_OSS_COMMIT_LLM_TIMEOUT_MS Hard timeout on the external provider call (default 60000).
   DAN_OSS_COMMIT_ALLOW_SECRETS  1/true/yes to downgrade the secret gate to advisory.
   (The Generate button needs a provider API key, e.g. OPENAI_API_KEY, set in your environment.)
