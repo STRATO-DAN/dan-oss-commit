@@ -3,6 +3,36 @@
 All notable changes to `@strato-dan/commit` are documented here.
 This project uses [semantic versioning](https://semver.org/).
 
+## [0.8.1] — 2026-09-24
+
+### Security
+
+- **The pre-auth rate limit could throttle a legitimate authenticated caller.** `preAuthLimit` was
+  checked for EVERY `/api/` request, authenticated or not, before the bearer check — a single
+  budget shared by everyone. A flood of bad-auth requests exhausted it, and a subsequent real,
+  correctly-authenticated request got a 429 before ever reaching `bearerOk()`. Live-demonstrated,
+  independently, before this fix. Fixed by resolving auth first (cheap, no expensive work happens
+  before it) and applying `preAuthLimit` only on the failure path — an authenticated request never
+  touches it at all. Matches the pattern already proven correct in `@strato-dan/recall-dashboard`.
+- **`/api/generate` and `/api/commit` no longer share one rate-limit budget.** They used to share
+  `writeLimit` — two semantically unrelated actions (an LLM call a user naturally retries while
+  drafting; the actual git-mutating action) drawing from the same counter, so iterating on Generate
+  could 429 a real Commit. Split into `DAN_OSS_COMMIT_GENERATE_MAX`/`DAN_OSS_COMMIT_COMMIT_MAX`
+  (each defaulting to 60/min, same as before), fully independent.
+
+### Fixed
+
+- **A 401 on `/api/status` no longer renders as "undefined is not a real git repository."** The
+  dashboard checked `isRepo` before checking whether the request even succeeded — an expired/wrong
+  token was blamed on the repo instead of the session. Now shows the real reason.
+- **Commit success now discloses the hooks/signing flags and any resync warning.** `hooksBypassed`/
+  `signed`/`warning` were always computed and returned by the API but never shown — the success
+  line said only "Committed." Given this tool's own history (external review finding #1 was
+  specifically about hooks being misunderstood), the success screen is exactly where this belongs.
+- **A failed diff reload no longer leaves a stale reviewed-snapshot in the UI.** The server's own
+  snapshot-CAS check already refused a stale commit either way (409 on drift) — this closes the
+  UI-side staleness too rather than leaning entirely on that rebound.
+
 ## [0.8.0] — 2026-09-23
 
 ### Security

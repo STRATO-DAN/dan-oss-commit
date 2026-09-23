@@ -61,6 +61,13 @@ function updateMsgMeta() {
 async function loadStatus() {
   const res = await api("/api/status");
   const data = await res.json();
+  // REAL FIX (2026-09-24): an unauthenticated/401 response has no `isRepo`/`cwd` at all (the
+  // server never gets past the bearer check) — check auth failure FIRST, or this printed the
+  // misleading "undefined is not a real git repository", blaming the repo for a session problem.
+  if (!res.ok || data.ok === false) {
+    $("status").textContent = data.reason || `request failed (${res.status})`;
+    return false;
+  }
   if (!data.isRepo) {
     $("status").textContent = `${data.cwd} is not a real git repository.`;
     return false;
@@ -98,6 +105,12 @@ async function loadDiff() {
   const res = await api("/api/diff");
   const data = await res.json();
   if (!data.ok) {
+    // REAL FIX (2026-09-24): a failed diff load used to leave `currentSnapshot` holding its
+    // previous value. The server's own snapshot-CAS check (409 on drift) already refuses a stale
+    // commit either way — this never let anything unverified land — but the UI shouldn't lean
+    // entirely on that rebound when it can just as easily hold no stale state at all.
+    currentSnapshot = null;
+    $("commit").disabled = true;
     $("diff").textContent = data.reason;
     return;
   }
@@ -182,7 +195,17 @@ async function commit() {
       $("commit").disabled = false;
       return;
     }
-    status.innerHTML = `Committed — <strong>${data.sha}</strong>`;
+    // REAL FIX (2026-09-24): the server's C2 transparency flags (hooksBypassed/signed) and, on a
+    // resync failure, a real actionable `warning` (run `git reset --mixed HEAD` by hand) were
+    // computed but never shown — the success line said only "Committed", the same silence the
+    // original external review's finding #1 was about. The success screen is exactly where this
+    // belongs, not buried in a response body nobody reads.
+    const disclosures = [];
+    if (data.hooksBypassed) disclosures.push("hooks did not run");
+    if (data.signed === false) disclosures.push("not signed");
+    const disclosureText = disclosures.length ? ` <span class="hint">(${disclosures.join(", ")})</span>` : "";
+    status.innerHTML = `Committed — <strong>${data.sha}</strong>${disclosureText}`
+      + (data.warning ? `<br><span style="color: var(--dan-red)">${escapeHtml(data.warning)}</span>` : "");
     $("message").value = "";
     updateMsgMeta();
     await loadDiff();

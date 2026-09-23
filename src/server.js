@@ -175,7 +175,15 @@ export function createServer({ cwd = process.cwd(), token = makeToken() } = {}) 
   // token.
   const preAuthLimit = makeRateLimiter({ windowMs: 60_000, max: Number(process.env.DAN_OSS_COMMIT_PREAUTH_RATE_MAX) || 300 });
   const apiLimit = makeRateLimiter({ windowMs: 60_000, max: Number(process.env.DAN_OSS_COMMIT_RATE_MAX) || 300 });
-  const writeLimit = makeRateLimiter({ windowMs: 60_000, max: Number(process.env.DAN_OSS_COMMIT_WRITE_MAX) || 60 });
+  // 🔴 REAL FIX (2026-09-24): a single shared `writeLimit` gated BOTH /api/generate and
+  // /api/commit — two semantically unrelated actions (one calls an external LLM and is the one a
+  // user naturally retries a few times while drafting a message; the other is the actual
+  // git-mutating action). Sharing one budget meant a burst of Generate calls while iterating on a
+  // message could exhaust the SAME budget the real Commit needed, producing a confusing 429 on an
+  // action the caller never rate-limited themselves into. Same separation-of-concerns reasoning
+  // already applied to preAuthLimit vs apiLimit above — each real action gets its own budget.
+  const generateLimit = makeRateLimiter({ windowMs: 60_000, max: Number(process.env.DAN_OSS_COMMIT_GENERATE_MAX) || 60 });
+  const commitLimit = makeRateLimiter({ windowMs: 60_000, max: Number(process.env.DAN_OSS_COMMIT_COMMIT_MAX) || 60 });
   const commitMutex = makeMutex();
   // FINDING 09 fix: bound admission is not enough — concurrent generate/commit paths hold
   // git children + LLM sockets. Cap in-flight LLM generations fail-closed (503) so total
@@ -194,23 +202,31 @@ export function createServer({ cwd = process.cwd(), token = makeToken() } = {}) 
 
     try {
       if (isApi) {
-        // 🔴 C3 — RATE LIMIT BEFORE AUTH. The rate check runs ahead of the bearer check so the
-        // unauthenticated 401 path (which writes an auth-failure audit line) is itself throttled — an
-        // unauthenticated flood can no longer drive unbounded audit writes / disk churn by never
-        // presenting a valid token. A throttled request never reaches the audit write below.
-        // This is `preAuthLimit`, not `apiLimit` — see its declaration for why the two are now
-        // separate real budgets.
-        if (!preAuthLimit()) {
-          return sendJson(res, 429, { ok: false, reason: "rate limit exceeded — slow down" });
-        }
-        // 🔴 AUTH — locality is not identity. Every /api/ op needs the instance bearer token.
+        // 🔴 REAL FIX (2026-09-24, independently verified live — Muse): the PREVIOUS shape here
+        // checked `preAuthLimit()` for EVERY /api/ request, authenticated or not, BEFORE the
+        // bearer check — a single budget shared across ALL callers regardless of auth status. That
+        // meant 300 bad-auth requests exhausted the SAME budget a legitimate authenticated caller
+        // needed, so a real, properly-authenticated request could get 429'd by someone else's
+        // unauthenticated flood before ever reaching `bearerOk()`. The earlier commit's own claim
+        // ("apiLimit... can never be exhausted by an unauthenticated flood") was true for `apiLimit`
+        // itself, but didn't notice `preAuthLimit` gated availability for EVERYONE regardless.
+        //
+        // Real fix, matching the pattern already proven correct elsewhere in this estate (dan-oss-
+        // recall-dashboard's `principals.authenticate()`-first shape): resolve auth FIRST (cheap,
+        // no expensive work happens before it), and only apply the pre-auth-flood protection on the
+        // FAILURE path — an authenticated request never touches `preAuthLimit` at all, so someone
+        // else's bad-auth flood cannot 429 a real, working session. `preAuthLimit` still does its
+        // original job (bounding audit-write growth from a flood that never presents a valid
+        // token), just scoped to the traffic that actually causes that problem.
         if (!bearerOk(req, token)) {
+          if (!preAuthLimit()) {
+            return sendJson(res, 429, { ok: false, reason: "rate limit exceeded — slow down" });
+          }
           audit({ action: "auth-failure", path: p, method: req.method });
           return sendJson(res, 401, { ok: false, reason: "unauthorized — missing or invalid bearer token" });
         }
-        // 🔴 REAL FIX (external review, 2026-09-23): the real, per-authenticated-user budget --
-        // checked ONLY here, after a valid token was already presented, so an unauthenticated flood
-        // (bounded separately by `preAuthLimit` above) can never consume the real user's own budget.
+        // 🔴 The real, per-authenticated-caller budget — reached only once a valid token was
+        // already presented, so it is never exhaustible by anyone who doesn't hold the real token.
         if (!apiLimit()) {
           return sendJson(res, 429, { ok: false, reason: "rate limit exceeded — slow down" });
         }
@@ -254,7 +270,7 @@ export function createServer({ cwd = process.cwd(), token = makeToken() } = {}) 
       }
 
       if (p === "/api/generate" && req.method === "POST") {
-        if (!writeLimit()) {
+        if (!generateLimit()) {
           return sendJson(res, 429, { ok: false, reason: "generate rate limit exceeded — slow down" });
         }
         if (inflightGenerate >= MAX_INFLIGHT_GENERATE) {
@@ -297,7 +313,7 @@ export function createServer({ cwd = process.cwd(), token = makeToken() } = {}) 
       }
 
       if (p === "/api/commit" && req.method === "POST") {
-        if (!writeLimit()) {
+        if (!commitLimit()) {
           return sendJson(res, 429, { ok: false, reason: "commit rate limit exceeded — slow down" });
         }
         const body = await readBody(req);
