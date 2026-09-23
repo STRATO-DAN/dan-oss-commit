@@ -40,7 +40,7 @@ async function filterOverrides(cwd) {
   try {
     const { stdout } = await run(
       "git",
-      ["-c", "core.fsmonitor=", "config", "--name-only", "--get-regexp", "^filter\\."],
+      ["-c", "core.fsmonitor=", "-c", `core.hooksPath=${NO_HOOKS_PATH}`, "config", "--name-only", "--get-regexp", "^filter\\."],
       { cwd, maxBuffer: 1024 * 1024, env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1" } },
     );
     flags = stdout
@@ -55,9 +55,19 @@ async function filterOverrides(cwd) {
   return flags;
 }
 
+// REAL FINDING (external review, 2026-09-23): the hardening above neutralizes fsmonitor and
+// filters, but NOT core.hooksPath -- a repo's own .git/hooks/post-index-change fires on nearly
+// every index read (including /api/diff, which merely SHOWS a diff), and reference-transaction
+// fires on commit. Both are real, arbitrary-code-execution paths from a hostile repo the README
+// promises can't happen. Fixed the same way as fsmonitor/filters: a `-c` override on every call.
+// Empirically confirmed (not assumed): pointing core.hooksPath at a path that does not exist
+// causes git to silently find no hook scripts there and proceed normally -- no error, no crash,
+// exactly the same "safe no-op" shape as `core.fsmonitor=` already relies on.
+const NO_HOOKS_PATH = "/dev/null/dan-oss-commit-hooks-disabled";
+
 async function git(cwd, args, extraEnv) {
   // Static + per-repo hardening prepended to EVERY git call this module makes.
-  const hardening = ["-c", "core.fsmonitor=", ...(await filterOverrides(cwd))];
+  const hardening = ["-c", "core.fsmonitor=", "-c", `core.hooksPath=${NO_HOOKS_PATH}`, ...(await filterOverrides(cwd))];
   try {
     const { stdout } = await run("git", [...hardening, ...args], {
       cwd,
@@ -83,9 +93,44 @@ export async function isRepo(cwd) {
   }
 }
 
-/** The real diff to commit — staged changes if any exist, otherwise all unstaged changes.
- * Never both silently combined: the caller is told which one it got, so "nothing staged, used
- * unstaged instead" is a visible fact, not a guess. */
+// REAL FINDING (external review, 2026-09-23): `git diff` (staged or not) never shows untracked
+// files at all -- not their name, not their content. But a `stageAll:true` commit runs `git add
+// -A` first, which DOES stage and commit untracked file content (see treeViaTempIndex above). The
+// result: a secret sitting in a brand-new, never-`git add`ed file was invisible in the reviewed
+// diff AND invisible to the secret scanner (which only ever sees this function's return value),
+// yet could still land in the commit. Fixed by synthesizing a real diff for each untracked file
+// via `git diff --no-index` against /dev/null (the real git binary renders the hunks — no
+// reimplementation of diff formatting) and folding it into the SAME diff text everything else
+// flows through, so review and the secret scanner both see it.
+async function untrackedDiff(cwd) {
+  const untracked = (await git(cwd, ["ls-files", "--others", "--exclude-standard"])).trim();
+  if (!untracked) return "";
+  const hardening = ["-c", "core.fsmonitor=", "-c", `core.hooksPath=${NO_HOOKS_PATH}`, ...(await filterOverrides(cwd))];
+  const parts = [];
+  for (const p of untracked.split("\n").filter(Boolean)) {
+    try {
+      // --no-index exits 0 only when the two sides are identical, which never happens here (one
+      // side is always /dev/null) -- so this always "fails" in execFile's eyes; real stdout is
+      // still on the rejected error, which is the actual diff we want.
+      const { stdout } = await run(
+        "git",
+        [...hardening, "diff", "--no-ext-diff", "--no-textconv", "--no-index", "--", "/dev/null", p],
+        { cwd, maxBuffer: 1024 * 1024 * 32, env: process.env },
+      );
+      parts.push(stdout);
+    } catch (err) {
+      // A real diff (exit 1, the expected case) still carries its stdout on the error object.
+      // Only a genuine failure with no stdout at all (e.g. a permission error) skips this one
+      // file rather than failing the whole diff for every other real change.
+      if (typeof err.stdout === "string" && err.stdout) parts.push(err.stdout);
+    }
+  }
+  return parts.join("");
+}
+
+/** The real diff to commit — staged changes if any exist, otherwise all unstaged changes plus
+ * untracked file content. Never both silently combined: the caller is told which one it got, so
+ * "nothing staged, used unstaged instead" is a visible fact, not a guess. */
 export async function realDiff(cwd) {
   // --no-ext-diff/--no-textconv: never let a repo's diff.external or a textconv driver execute while
   // we render its own diff (part of the hostile-repo hardening above).
@@ -94,7 +139,24 @@ export async function realDiff(cwd) {
     return { diff: staged, source: "staged" };
   }
   const unstaged = await git(cwd, ["diff", "--no-ext-diff", "--no-textconv"]);
-  return { diff: unstaged, source: unstaged.trim() ? "unstaged" : "none" };
+  const untracked = await untrackedDiff(cwd);
+  const diff = unstaged + untracked;
+  return { diff, source: diff.trim() ? "unstaged" : "none" };
+}
+
+/** The exact diff text for whichever tree a commit request asks to commit — used to run the
+ * secret scanner on the COMMIT path itself (previously only `llm.js`'s optional generate path
+ * ever called detectSecrets, so a user who wrote their own message and skipped Generate could
+ * commit a secret with no scan at all). Independent of `realDiff`'s staged-vs-unstaged auto-
+ * detection: `stageAll` here is the same real flag that decides which tree `commitTree` writes
+ * (workTree vs stagedTree), so the scanned text always matches the tree actually being committed,
+ * including staged content when a caller sets stageAll:true alongside existing staged changes. */
+export async function diffForCommit(cwd, stageAll) {
+  const staged = await git(cwd, ["diff", "--no-ext-diff", "--no-textconv", "--staged"]);
+  if (!stageAll) return staged;
+  const unstaged = await git(cwd, ["diff", "--no-ext-diff", "--no-textconv"]);
+  const untracked = await untrackedDiff(cwd);
+  return staged + unstaged + untracked;
 }
 
 export async function changedFiles(cwd, source) {

@@ -22,6 +22,15 @@ const CASES = [
   ["jwt", "eyJ" + "abcdefghij" + "." + "klmnopqrst" + "." + "uvwxyz0123"],
   ["generic-secret-assignment", 'password = "' + "hunter2xxx" + '"'],
   ["generic-secret-assignment", "api_key: '" + "s3cr3tv4lue" + "'"],
+  // REAL FIX (external review, 2026-09-23): the real, common shape (all-caps env-style with
+  // "_ACCESS_KEY" between "SECRET" and the assignment) previously never matched at all -- no
+  // separator was allowed between "aws_secret" and the value.
+  ["aws-secret-key", "AWS_SECRET_ACCESS_KEY=" + "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY"],
+  ["aws-secret-key", "aws_secret_key: " + "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY"],
+  // REAL ADDITIONS (external review, 2026-09-23): three real provider shapes previously missed.
+  ["sendgrid-api-key", "SG." + "a".repeat(22) + "." + "b".repeat(43)],
+  ["huggingface-token", "hf_" + "AbCdEfGhIjKlMnOpQrStUvWxYz".repeat(1)],
+  ["azure-storage-account-key", "AccountKey=" + "a".repeat(60) + "=="],
 ];
 
 for (const [name, sample] of CASES) {
@@ -44,6 +53,15 @@ test("detectSecrets does not flag prefixes that are too short to be a credential
   assert.deepEqual(detectSecrets("+let x = 'sk-short';"), []); // sk- but < 20 chars
   assert.deepEqual(detectSecrets("+// AKIA is a prefix"), []); // AKIA but not followed by 16 key chars
   assert.deepEqual(detectSecrets("+password = 'short'"), []); // quoted value < 8 chars
+});
+
+// REAL FALSE-POSITIVE FIX (external review, 2026-09-23): the exact case the review flagged --
+// this is a property access expression (a real value the variable already holds), never a
+// literal secret. The unquoted-assignment pattern's value class used to allow `.`, which made
+// this match; fixed by removing `.` from that class.
+test("detectSecrets does not flag ordinary property-access code as a secret", () => {
+  assert.deepEqual(detectSecrets("+password = user.passwordHash;"), []);
+  assert.deepEqual(detectSecrets("+const token = req.session.token;"), []);
 });
 
 test("detectSecrets reports every distinct type present, deduped", () => {

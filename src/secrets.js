@@ -47,10 +47,19 @@ const PATTERNS = [
   },
   // FINDING 04 fix: unquoted key=value credentials (`api_key=abc123...`, `secret: xyz...`).
   // Value class excludes whitespace/comment terminators; linear (no nesting).
+  //
+  // REAL FALSE-POSITIVE FIX (external review, 2026-09-23): the value class used to allow `.`,
+  // which made this match real, normal code like `password = user.passwordHash` -- a property
+  // access expression, not a literal secret value. A dot immediately inside an unquoted "value"
+  // is the real, distinguishing signal of "this is code referencing something", not "this is a
+  // credential" (an actual raw secret value is essentially always base64/hex/url-safe chars, never
+  // containing a literal `.` the way an identifier chain does). Removed `.` from the class --
+  // real credential shapes with dots (JWTs, version-y API keys) are already covered by their own
+  // dedicated patterns above, so this narrowing doesn't create a new miss.
   {
     name: "unquoted-secret-assignment",
     re: new RegExp(
-      F("(password|passwd|secret|token|api[_-]?key)", "\\s*[:=]\\s*", "[A-Za-z0-9_.\\-/+]{12,}"),
+      F("(password|passwd|secret|token|api[_-]?key)", "\\s*[:=]\\s*", "[A-Za-z0-9_\\-/+]{12,}"),
       "i",
     ),
   },
@@ -61,9 +70,18 @@ const PATTERNS = [
     re: new RegExp(F("(postgres|postgresql|mysql|mongodb(\\+srv)?|redis|amqp)(s)?://", "[^\\s\"']{8,}"), "i"),
   },
   // FINDING 04 fix: additional provider prefixes missed by the base set.
-  { name: "aws-secret-key", re: new RegExp(F("aws_secret", "[A-Za-z0-9/+=]{30,}"), "i") },
+  // REAL FIX (external review, 2026-09-23): the original pattern required value chars to follow
+  // "aws_secret" with NO separator, so the single most common real shape
+  // (`AWS_SECRET_ACCESS_KEY=...`) never matched -- `_ACCESS_KEY=` sits between "secret" and the
+  // value and broke the match entirely. Fixed to allow the real `_ACCESS_KEY` infix and a real
+  // assignment operator before the value, still a linear concatenation of fixed pieces.
+  { name: "aws-secret-key", re: new RegExp(F("aws", "[_-]?secret", "([_-]?access)?[_-]?key", "\\s*[:=]\\s*", "[\"']?", "[A-Za-z0-9/+=]{30,}"), "i") },
   { name: "anthropic-api-key", re: new RegExp(F("sk-ant-", "[A-Za-z0-9_-]{20,}")) },
   { name: "openai-project-key", re: new RegExp(F("sk-proj-", "[A-Za-z0-9_-]{20,}")) },
+  // REAL ADDITION (external review, 2026-09-23): three real provider shapes the base set missed.
+  { name: "sendgrid-api-key", re: new RegExp(F("SG\\.", "[A-Za-z0-9_-]{20,}", "\\.", "[A-Za-z0-9_-]{20,}")) },
+  { name: "huggingface-token", re: new RegExp(F("hf_", "[A-Za-z0-9]{20,}")) },
+  { name: "azure-storage-account-key", re: new RegExp(F("AccountKey", "\\s*=\\s*", "[A-Za-z0-9+/]{60,}={0,2}"), "i") },
 ];
 
 /**

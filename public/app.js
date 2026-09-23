@@ -128,6 +128,16 @@ async function generate() {
     }
     currentSource = diffData.source;
     currentSnapshot = diffData.snapshot;
+    // REAL FIX (external review, 2026-09-23): this fetch above already re-reads the CURRENT repo
+    // state and rebinds currentSnapshot to it — but the on-screen diff panel used to keep showing
+    // whatever loadDiff() last rendered. If the repo changed between that last render and this
+    // fetch, the user would review stale text on screen while authorizing (via currentSnapshot)
+    // the NEW, unseen state for the eventual commit. Re-render with the fresh data so what's on
+    // screen always matches what generate/commit are actually operating on.
+    $("diff").innerHTML = renderDiff(diffData.diff);
+    $("files").innerHTML = diffData.files
+      .map((f) => `<li><span class="file-status ${f.status[0]}">${f.status[0]}</span><span>${escapeHtml(f.path)}</span></li>`)
+      .join("") + `<li class="hint" style="margin-top:6px;">source: ${diffData.source}</li>`;
     const res = await api("/api/generate", {
       method: "POST",
       headers: { "content-type": "application/json" },

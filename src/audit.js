@@ -50,13 +50,26 @@ export function makeAudit() {
   } catch {
     /* not present yet, or not ours — nothing to tighten */
   }
-  let prevHash = lastHashOf(file);
+  // 🔴 REAL FIX (external review, 2026-09-23): `prevHash` used to be a closure variable, seeded
+  // ONCE here and only ever advanced in-memory after this process's OWN writes -- "running two
+  // copies of the tool at once makes the tamper-evident log report tampering that never
+  // happened." Confirmed real: if process A writes (advancing the file's real tail to Y) while
+  // process B's in-memory prevHash is still the pre-A value X, B's next write chains from X, not
+  // Y -- a real, false chain-break on the NEXT verifyAudit() run, from ordinary concurrent
+  // legitimate use, not tampering. Fixed: re-read the real tail from disk immediately before
+  // EVERY write, never trust an in-memory value across writes. This narrows the race to the
+  // literal read-then-write window (a genuinely simultaneous write from another process in that
+  // exact instant could still interleave) rather than "any time since this process started" --
+  // real, substantial improvement; full elimination would need real file locking, out of scope
+  // for this fix and consistent with this file's own documented residual-risk posture elsewhere
+  // (see the truncate-and-reforge caveat above).
 
   // Returns true/false so a caller can surface "did this event actually get recorded?" in its own
   // response — the write itself still never throws and never blocks the real operation (an audit
   // failure was always meant to degrade the audit trail, not the security-relevant action it describes).
   return function audit(event) {
     try {
+      const prevHash = lastHashOf(file); // real, fresh read -- never a stale in-memory value
       const record = { ts: new Date().toISOString(), ...event };
       const serialized = JSON.stringify(record);
       const hash = chainHash(prevHash, serialized);
@@ -69,7 +82,6 @@ export function makeAudit() {
       } finally {
         fs.closeSync(fd);
       }
-      prevHash = hash; // advance the chain only after a durable write
       return true;
     } catch (err) {
       if (!warned) {
