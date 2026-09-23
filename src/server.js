@@ -19,8 +19,10 @@ import {
   repoTrees,
   snapshotOfTrees,
   commitTree,
+  diffForCommit,
 } from "./git.js";
-import { generateCommitMessage, configuredProvider } from "./llm.js";
+import { generateCommitMessage, configuredProvider, secretsAllowed } from "./llm.js";
+import { detectSecrets } from "./secrets.js";
 import { makeToken, bearerOk } from "./auth.js";
 import { makeAudit } from "./audit.js";
 
@@ -163,6 +165,15 @@ function validateMessage(message) {
 
 export function createServer({ cwd = process.cwd(), token = makeToken() } = {}) {
   const audit = makeAudit();
+  // 🔴 REAL FIX (external review, 2026-09-23): the original single `apiLimit`, checked before auth,
+  // was ONE shared budget -- "300 requests with a wrong password lock the real user out for a
+  // minute." Split into two real limiters: `preAuthLimit` bounds EVERY request regardless of auth
+  // status (still protects the audit-write-flood concern documented below -- an unauthenticated
+  // flood can't grow unbounded), and `apiLimit` is now the real per-user working budget, checked
+  // only AFTER a request already passed `bearerOk()` -- so it accumulates only genuine authenticated
+  // traffic and can no longer be exhausted by someone who never has (or never presents) a valid
+  // token.
+  const preAuthLimit = makeRateLimiter({ windowMs: 60_000, max: Number(process.env.DAN_OSS_COMMIT_PREAUTH_RATE_MAX) || 300 });
   const apiLimit = makeRateLimiter({ windowMs: 60_000, max: Number(process.env.DAN_OSS_COMMIT_RATE_MAX) || 300 });
   const writeLimit = makeRateLimiter({ windowMs: 60_000, max: Number(process.env.DAN_OSS_COMMIT_WRITE_MAX) || 60 });
   const commitMutex = makeMutex();
@@ -187,13 +198,21 @@ export function createServer({ cwd = process.cwd(), token = makeToken() } = {}) 
         // unauthenticated 401 path (which writes an auth-failure audit line) is itself throttled — an
         // unauthenticated flood can no longer drive unbounded audit writes / disk churn by never
         // presenting a valid token. A throttled request never reaches the audit write below.
-        if (!apiLimit()) {
+        // This is `preAuthLimit`, not `apiLimit` — see its declaration for why the two are now
+        // separate real budgets.
+        if (!preAuthLimit()) {
           return sendJson(res, 429, { ok: false, reason: "rate limit exceeded — slow down" });
         }
         // 🔴 AUTH — locality is not identity. Every /api/ op needs the instance bearer token.
         if (!bearerOk(req, token)) {
           audit({ action: "auth-failure", path: p, method: req.method });
           return sendJson(res, 401, { ok: false, reason: "unauthorized — missing or invalid bearer token" });
+        }
+        // 🔴 REAL FIX (external review, 2026-09-23): the real, per-authenticated-user budget --
+        // checked ONLY here, after a valid token was already presented, so an unauthenticated flood
+        // (bounded separately by `preAuthLimit` above) can never consume the real user's own budget.
+        if (!apiLimit()) {
+          return sendJson(res, 429, { ok: false, reason: "rate limit exceeded — slow down" });
         }
         // POSTs must be application/json — refuses a text/plain cross-origin simple-POST outright.
         if (req.method === "POST") {
@@ -311,6 +330,29 @@ export function createServer({ cwd = process.cwd(), token = makeToken() } = {}) 
           }
           try {
             const stageAll = body.stageAll === true;
+            // REAL FIX (external review, 2026-09-23): the secret scanner (secrets.js) was only ever
+            // invoked from the optional /api/generate path — a caller who wrote their own message
+            // (or skipped Generate) could commit a raw credential with no scan at all, and a secret
+            // living only in an untracked file was invisible to the diff `realDiff` returned anyway.
+            // Scan the EXACT diff for the tree actually about to be committed, same deny-by-default /
+            // DAN_OSS_COMMIT_ALLOW_SECRETS-override policy already used for the generate path.
+            const scanDiff = await diffForCommit(cwd, stageAll);
+            const secretPatterns = detectSecrets(scanDiff);
+            if (secretPatterns.length > 0 && !secretsAllowed()) {
+              audit({ action: "commit-blocked", reason: "secret-detected", patterns: secretPatterns, cwd, branch: await currentBranch(cwd).catch(() => null) });
+              return {
+                status: 422,
+                body: {
+                  ok: false,
+                  secretBlocked: true,
+                  patterns: secretPatterns,
+                  reason:
+                    `refusing to commit: the reviewed changes appear to contain ` +
+                    `${secretPatterns.length === 1 ? "a secret" : "secrets"} (matched: ${secretPatterns.join(", ")}). ` +
+                    "Remove the credential, or set DAN_OSS_COMMIT_ALLOW_SECRETS=1 to override.",
+                },
+              };
+            }
             const tree = stageAll ? trees.workTree : trees.stagedTree;
             const committed = await commitTree(cwd, tree, trees.head, body.message);
             // 🔴 C1 — once commitTree returns, the commit is DURABLE on HEAD even if the index/worktree

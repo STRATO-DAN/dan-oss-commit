@@ -109,7 +109,7 @@ async function callOpenAI(apiKey, diff) {
 // Opt-in override: `1` / `true` / `yes` (case-insensitive) downgrades the block to the advisory warning
 // and proceeds. Read per-call, like every other DAN_OSS_COMMIT_* env var here — never cached at module
 // load, so a caller (or a test) can actually toggle it.
-function secretsAllowed() {
+export function secretsAllowed() {
   const v = String(process.env.DAN_OSS_COMMIT_ALLOW_SECRETS || "").trim().toLowerCase();
   return v === "1" || v === "true" || v === "yes";
 }

@@ -81,13 +81,65 @@ test("changedFiles reports the real per-file status for the same source realDiff
     await fs.writeFile(path.join(repo, "a.txt"), "hello\n");
     await run("git", ["add", "-A"], { cwd: repo });
     await run("git", ["commit", "-q", "-m", "initial"], { cwd: repo });
-    // A real unstaged MODIFICATION to a tracked file — `git diff` (and so `realDiff`/
-    // `changedFiles`) never sees a brand-new untracked file at all, only tracked changes.
+    // A real unstaged MODIFICATION to a tracked file — `git diff` alone never names a brand-new
+    // untracked file (that's `changedFiles`'s own `ls-files --others` fallback below); `realDiff`
+    // now folds untracked CONTENT in too (see the next test), but there is none here to fold.
     await fs.writeFile(path.join(repo, "a.txt"), "hello\nplus a real change\n");
     const { source } = await realDiff(repo);
     assert.equal(source, "unstaged");
     const files = await changedFiles(repo, source);
     assert.deepEqual(files, [{ status: "M", path: "a.txt" }]);
+  } finally {
+    await fs.rm(repo, { recursive: true, force: true });
+  }
+});
+
+// REAL FIX (external review, 2026-09-23): `git diff` on its own never shows untracked file content
+// at all -- only `changedFiles`'s separate `ls-files --others` call named the file, with no bytes.
+// `realDiff` now synthesizes and folds in a real diff for each untracked file, so the reviewed diff
+// text (and anything that scans it, e.g. the secret gate) actually sees what a `stageAll:true`
+// commit would include.
+test("realDiff folds untracked file CONTENT into the diff text, not just tracked changes", async () => {
+  const repo = await makeRepo();
+  try {
+    await fs.writeFile(path.join(repo, "a.txt"), "hello\n");
+    await run("git", ["add", "-A"], { cwd: repo });
+    await run("git", ["commit", "-q", "-m", "initial"], { cwd: repo });
+
+    // A genuinely new, never-`git add`ed file — the exact case that used to be invisible.
+    await fs.writeFile(path.join(repo, "new-file.txt"), "brand new untracked content\n");
+    const { source, diff } = await realDiff(repo);
+    assert.equal(source, "unstaged");
+    assert.match(diff, /brand new untracked content/, "untracked file content must appear in the diff text");
+    assert.match(diff, /new-file\.txt/, "the diff must name the untracked file it's showing");
+  } finally {
+    await fs.rm(repo, { recursive: true, force: true });
+  }
+});
+
+// diffForCommit is what the server's commit-path secret scan actually reads — its output must
+// track exactly which tree `stageAll` says is about to be committed, including the case a raw API
+// caller could force (stageAll:true alongside pre-existing staged content), not just the UI's own
+// (bypassable) restriction that the two never coexist.
+test("diffForCommit(stageAll) reflects exactly the tree being committed, including staged+untracked together", async () => {
+  const { diffForCommit } = await import("../src/git.js");
+  const repo = await makeRepo();
+  try {
+    await fs.writeFile(path.join(repo, "a.txt"), "hello\n");
+    await run("git", ["add", "-A"], { cwd: repo });
+    await run("git", ["commit", "-q", "-m", "initial"], { cwd: repo });
+
+    await fs.writeFile(path.join(repo, "a.txt"), "hello\nstaged edit\n");
+    await run("git", ["add", "-A"], { cwd: repo });
+    await fs.writeFile(path.join(repo, "untracked.txt"), "untracked content\n");
+
+    const stagedOnly = await diffForCommit(repo, false);
+    assert.match(stagedOnly, /staged edit/);
+    assert.doesNotMatch(stagedOnly, /untracked content/, "stageAll:false must not scan content it won't commit");
+
+    const withStageAll = await diffForCommit(repo, true);
+    assert.match(withStageAll, /staged edit/, "stageAll:true still includes real staged content");
+    assert.match(withStageAll, /untracked content/, "stageAll:true must also include untracked content it WILL commit");
   } finally {
     await fs.rm(repo, { recursive: true, force: true });
   }

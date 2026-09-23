@@ -128,6 +128,38 @@ test("C5: the chain continues unbroken across separate audit sessions (process r
   }
 });
 
+// REAL FIX (external review, 2026-09-23): before the fix, `prevHash` was seeded ONCE per
+// `makeAudit()` call and only ever advanced in-memory after that same audit()'s OWN writes.
+// Two independent `makeAudit()` instances (exactly what two concurrent processes each create)
+// pointed at the same file writing interleaved would each chain from a stale in-memory prevHash,
+// producing a REAL, FALSE chain-break on verifyAudit() -- from ordinary legitimate concurrent
+// use, not tampering. This proves the fix: interleaved writes from two independently-created
+// audit() closures now verify clean, because each write re-reads the real tail from disk instead
+// of trusting a value cached at construction time.
+test("C6: two concurrent makeAudit() instances writing interleaved do not produce a false chain-break", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "dan-oss-commit-c6-"));
+  const file = path.join(dir, "audit.log");
+  try {
+    // Two independently-constructed audit() closures, simulating two separate processes that
+    // each called makeAudit() once at startup -- the exact scenario the review described.
+    const auditA = makeAuditAt(file);
+    const auditB = makeAuditAt(file);
+
+    // Interleave: A writes, then B writes (from a closure that was already alive before A's
+    // write happened, i.e. it never "knew" about A's write at construction time), then A again.
+    auditA({ action: "commit", sha: "procA-1" });
+    auditB({ action: "commit", sha: "procB-1" });
+    auditA({ action: "commit", sha: "procA-2" });
+    auditB({ action: "commit", sha: "procB-2" });
+
+    const v = verifyAudit(file);
+    assert.equal(v.ok, true, `interleaved writes from two processes must not look like tampering (${v.reason})`);
+    assert.equal(v.entries, 4);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 // ── real security events actually reach the audit log, over real HTTP ─────────────────────────────
 
 async function makeRepo() {
